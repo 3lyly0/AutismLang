@@ -1,0 +1,10 @@
+fn main():
+    msg = "hi"
+    name = "AutismLang"
+    year = 2026
+    full = "Welcome to " + name
+
+    print(msg)
+    print(full)
+    print("year = " + "2026")
+    print(year)
