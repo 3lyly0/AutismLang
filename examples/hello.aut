@@ -1,10 +1,31 @@
+fn greet(name, times):
+    i = 0
+    while i < times:
+        print("hello " + name)
+        i = i + 1
+
 fn main():
     msg = "hi"
     name = "AutismLang"
     year = 2026
+    a = 10 + 5 * 2
+    b = (10 + 5) * 2
+    c = b - a
+    d = b / 2
     full = "Welcome to " + name
 
     print(msg)
     print(full)
     print("year = " + "2026")
     print(year)
+    print(a)
+    print(b)
+    print(c)
+    print(d)
+
+    if year == 2027:
+        print("wrong year")
+    else:
+        print("if/else works")
+
+    greet(name, 2)
