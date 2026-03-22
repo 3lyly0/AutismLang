@@ -13,8 +13,6 @@ jobs:
   build-assets:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +40,11 @@ jobs:
             ext: zip
 
     steps:
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -94,9 +97,12 @@ jobs:
     name: publish-release
     runs-on: ubuntu-latest
     needs: build-assets
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
