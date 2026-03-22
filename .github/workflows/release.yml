@@ -1,5 +1,8 @@
 name: Release
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
     tags:
@@ -39,12 +42,11 @@ jobs:
             platform: windows-x64
             ext: zip
 
-    steps:
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+    defaults:
+      run:
+        shell: ${{ matrix.shell == 'msys2' && 'msys2 {0}' || 'bash' }}
 
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -58,9 +60,7 @@ jobs:
             zip
             mingw-w64-ucrt-x86_64-gcc
 
-      - name: Build binary (Unix)
-        if: matrix.shell == 'bash'
-        shell: bash
+      - name: Build binary
         run: |
           set -eu
           TAG="${GITHUB_REF_NAME:-dev}"
@@ -70,22 +70,11 @@ jobs:
           mkdir -p dist
           cp ${{ matrix.out_bin }} dist/
           cp LICENSE README.md VERSION.json dist/
-          tar -czf "dist/${ARCHIVE}" -C dist ${{ matrix.out_bin }} LICENSE README.md VERSION.json
-
-      - name: Build binary (Windows/MSYS2)
-        if: matrix.shell == 'msys2'
-        shell: msys2 {0}
-        run: |
-          set -eu
-          TAG="${GITHUB_REF_NAME:-dev}"
-          ARCHIVE="autismlang-${TAG}-${{ matrix.platform }}.${{ matrix.ext }}"
-          gcc -O2 -o ${{ matrix.out_bin }} autism.c
-          ./${{ matrix.out_bin }} --version
-          mkdir -p dist
-          cp ${{ matrix.out_bin }} dist/
-          cp LICENSE README.md VERSION.json dist/
-          cd dist
-          zip -9 "${ARCHIVE}" ${{ matrix.out_bin }} LICENSE README.md VERSION.json
+          if [[ "${{ matrix.shell }}" == "msys2" ]]; then
+            cd dist && zip -9 "${ARCHIVE}" ${{ matrix.out_bin }} LICENSE README.md VERSION.json
+          else
+            tar -czf "dist/${ARCHIVE}" -C dist ${{ matrix.out_bin }} LICENSE README.md VERSION.json
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -98,11 +87,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-assets
     steps:
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:

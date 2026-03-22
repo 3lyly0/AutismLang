@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
   pull_request:
@@ -28,12 +31,11 @@ jobs:
             shell: msys2
             binary: autism.exe
 
-    steps:
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+    defaults:
+      run:
+        shell: ${{ matrix.shell == 'msys2' && 'msys2 {0}' || 'bash' }}
 
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -49,32 +51,13 @@ jobs:
             grep
             mingw-w64-ucrt-x86_64-gcc
 
-      - name: Build compiler (Unix)
-        if: matrix.shell == 'bash'
-        shell: bash
+      - name: Build compiler
         run: |
           set -eu
-          ${{ matrix.compiler }} -O2 -o autism autism.c
-          ./autism --version
+          ${{ matrix.compiler }} -O2 -o ${{ matrix.binary }} autism.c
+          ./${{ matrix.binary }} --version
 
-      - name: Build compiler (Windows/MSYS2)
-        if: matrix.shell == 'msys2'
-        shell: msys2 {0}
+      - name: Run tests
         run: |
           set -eu
-          gcc -O2 -o autism.exe autism.c
-          ./autism.exe --version
-
-      - name: Run tests (Unix)
-        if: matrix.shell == 'bash'
-        shell: bash
-        run: |
-          set -eu
-          make test
-
-      - name: Run tests (Windows/MSYS2)
-        if: matrix.shell == 'msys2'
-        shell: msys2 {0}
-        run: |
-          set -eu
-          AUTISM=./autism.exe make test
+          AUTISM=./${{ matrix.binary }} make test
