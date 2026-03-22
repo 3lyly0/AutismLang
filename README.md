@@ -1,7 +1,8 @@
-# AutismLang (Bootstrap v0)
+# AutismLang (Bootstrap v0.0.1)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository currently contains a bootstrap compiler written in C with Python-like syntax for function layout.
+Current backend emits C code, then compiles it with GCC.
 
 ## Current Syntax
 
@@ -31,15 +32,18 @@ fn main():
 - `print(expression)` inside functions
 - `if condition:` blocks (single-level indentation inside functions)
 - `else:` blocks after `if`
+- `else if condition:` chained branching
 - `while condition:` loops
 - Function parameters and calls, for example: `fn greet(name): ...` then `greet("Neo")`
 - `return expression` from functions (default return is `0` when omitted)
 - Function calls inside expressions, for example: `x = add(2, 3) * 4`
 - `break` and `continue` inside `while` loops
-- Builtin `input()` / `input("prompt")` (compile-time input)
+- Boolean literals: `True`, `False` (also `true`, `false`)
+- Builtin `input()` / `input("prompt")` (always returns string)
 - Inline comments using `#` at the end of code lines
 - Condition operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Compiles to x86_64 Linux NASM assembly
+- Strict runtime type checks for arithmetic/comparisons
+- CLI flags: `--help`, `--version`, `--metadata`
 
 Example arithmetic behavior:
 
@@ -74,46 +78,81 @@ fn main():
 1. Build compiler (Linux/macOS with gcc or clang):
 
 ```bash
-gcc autismc.c -O2 -Wall -Wextra -std=c11 -o autismc
+gcc autism.c -O2 -Wall -Wextra -std=c11 -o autism
 ```
 
 2. Compile source:
 
 ```bash
-./autismc examples/hello.aut -o build/hello.asm
+./autism examples/hello.aut -o build/hello.c
 ```
 
-3. (Optional) Assemble and link on Linux:
+3. Build executable from generated C:
 
 ```bash
-nasm -felf64 build/hello.asm -o build/hello.o
-ld build/hello.o -o build/hello
+gcc -O2 build/hello.c -o build/hello
 ./build/hello
 ```
 
-### Windows Notes
+4. Run tests:
 
-- Build with MSVC Developer Command Prompt:
-
-```powershell
-cl /O2 /W4 /std:c11 autismc.c /Fe:autismc.exe
+```bash
+make test
 ```
 
-- Then run:
+## Version Metadata
 
-```powershell
-.\autismc.exe examples\hello.aut -o build\hello.asm
+- Semantic version is stored in `VERSION.json`
+- Compiler prints version with:
+
+```bash
+./autism --version
 ```
 
-- One-command native Windows compile + run (no GCC in link/run):
+- Compiler prints machine-readable metadata with:
 
-```powershell
-$ldBin = Split-Path (Get-Command ld).Source -Parent; $ldLib = Join-Path (Split-Path $ldBin -Parent) "lib"; .\autismc.exe examples\hello.aut -o build\hello.asm; if ($LASTEXITCODE -eq 0) { nasm -f win64 build\hello.asm -o build\hello.obj; if ($LASTEXITCODE -eq 0) { ld build\hello.obj -o build\hello.exe -e _start --subsystem console -L $ldLib -lkernel32; if ($LASTEXITCODE -eq 0) { .\build\hello.exe } } }
+```bash
+./autism --metadata
 ```
+
+## About ASM Output
+
+The active backend in `autism.c` currently emits C, not NASM.
+If you need assembly today, generate C first then ask GCC to emit assembly:
+
+```bash
+./autism examples/hello.aut -o build/hello.c
+gcc -S -masm=intel build/hello.c -o build/hello.s
+```
+
+## Automation (GitHub Actions)
+
+- CI runs automatically on every push and pull request across:
+  - Linux (GCC)
+  - macOS (Clang)
+  - Windows (MSYS2 + GCC)
+- Release workflow runs on tags like `v0.1.0` and publishes:
+  - Linux archive
+  - macOS archive
+  - Windows archive
+- GitHub Release notes are generated automatically from merged PRs.
+
+### Release Flow
+
+1. Update `VERSION.json`
+2. Commit and push
+3. Create and push tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+4. GitHub Actions will build all release binaries and create the release automatically.
 
 ## Next Milestones
 
-- Runtime expression evaluation (instead of compile-time folding)
-- `if`, `while`
-- Function calls with parameters
-- Backend for bare metal target (AutismOS)
+- `for ... in range(...)`
+- Builtin conversion helpers (`int()`, `str()`)
+- Data structures (planned later)
+- Native ASM backend (future milestone)

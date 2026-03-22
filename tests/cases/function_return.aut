@@ -1,0 +1,6 @@
+fn double(x):
+    return x * 2
+
+fn main():
+    value = double(9)
+    print(value)

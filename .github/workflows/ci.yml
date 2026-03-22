@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+            compiler: gcc
+            shell: bash
+            binary: autism
+          - name: macos-clang
+            os: macos-latest
+            compiler: clang
+            shell: bash
+            binary: autism
+          - name: windows-msys2-gcc
+            os: windows-latest
+            compiler: gcc
+            shell: msys2
+            binary: autism.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (Windows)
+        if: matrix.shell == 'msys2'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            diffutils
+            grep
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build compiler (Unix)
+        if: matrix.shell == 'bash'
+        shell: bash
+        run: |
+          set -eu
+          ${{ matrix.compiler }} -O2 -o autism autism.c
+          ./autism --version
+
+      - name: Build compiler (Windows/MSYS2)
+        if: matrix.shell == 'msys2'
+        shell: msys2 {0}
+        run: |
+          set -eu
+          gcc -O2 -o autism.exe autism.c
+          ./autism.exe --version
+
+      - name: Run tests (Unix)
+        if: matrix.shell == 'bash'
+        shell: bash
+        run: |
+          set -eu
+          make test
+
+      - name: Run tests (Windows/MSYS2)
+        if: matrix.shell == 'msys2'
+        shell: msys2 {0}
+        run: |
+          set -eu
+          AUTISM=./autism.exe make test

@@ -17,6 +17,9 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
+#define AUTISMLANG_VERSION "0.0.1"
+#define AUTISMLANG_BACKEND "c"
+
 /* ---- helpers ---- */
 static char g_err[512];
 #define ERR(...) snprintf(g_err,sizeof(g_err),__VA_ARGS__)
@@ -114,6 +117,8 @@ static Expr*parse_factor(const char**pp){
     if(is_ic(*p)){
         char id[128];size_t n=0;while(is_icc(**pp)){if(n+1>=sizeof(id)){ERR("ident too long");return NULL;}id[n++]=**pp;(*pp)++;}id[n]=0;skip(pp);
         if(**pp=='('){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=(strcmp(id,"input")==0)?EK_INPUT:EK_CALL;e->fn=xdup(id);if(!parse_args(pp,&e->args,&e->argc)){free_expr(e);return NULL;}if(e->kind==EK_INPUT&&e->argc>1){ERR("input() takes 0 or 1 arg");free_expr(e);return NULL;}return e;}
+        if(strcmp(id,"True")==0||strcmp(id,"true")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->ival=1;return e;}
+        if(strcmp(id,"False")==0||strcmp(id,"false")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->ival=0;return e;}
         Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_VAR;e->name=xdup(id);return e;
     }
     ERR("unexpected '%c'",(int)*p);return NULL;
@@ -143,7 +148,59 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         Stmt**tb;size_t tc;if(!parse_block(lines,bs,be,ind+4,&tb,&tc)){free_expr(cond);goto done;}
         *idx=be;while(*idx<lim){char*pr=xdup(lines->items[*idx]);rtrim(pr);if(!blank(pr)){free(pr);break;}free(pr);(*idx)++;}
         Stmt**eb=NULL;size_t ec=0;
-        if(*idx<lim){const char*er=lines->items[*idx];if(strlen(er)>=ind&&has_ind(er,ind)&&er[ind]!=' '){char*ec2=xdup(er+ind);rtrim(ec2);strip_comment(ec2);if(strcmp(ec2,"else:")==0){size_t es=*idx+1,ee=blk_end(lines,es,lim,ind+4);if(es<ee)parse_block(lines,es,ee,ind+4,&eb,&ec),*idx=ee;}free(ec2);}}
+        if(*idx<lim){
+            const char*er=lines->items[*idx];
+            if(strlen(er)>=ind&&has_ind(er,ind)&&er[ind]!=' '){
+                char*ec2=xdup(er+ind);rtrim(ec2);strip_comment(ec2);
+                if(strcmp(ec2,"else:")==0){
+                    size_t es=*idx+1,ee=blk_end(lines,es,lim,ind+4);
+                    if(es<ee&&!parse_block(lines,es,ee,ind+4,&eb,&ec)){free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                    *idx=ee;
+                }else if(strncmp(ec2,"else if ",8)==0){
+                    Stmt*chain_root=NULL;Stmt*chain_tail=NULL;
+                    while(*idx<lim){
+                        const char*cr=lines->items[*idx];
+                        if(strlen(cr)<ind||!has_ind(cr,ind)||cr[ind]==' ')break;
+                        char*line=xdup(cr+ind);rtrim(line);strip_comment(line);
+                        if(strncmp(line,"else if ",8)==0){
+                            const char*cc=ltrim(line+8);size_t ccl=strlen(cc);
+                            if(!ccl||cc[ccl-1]!=':'){free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);ERR("else if needs ':'");goto done;}
+                            char*cond_src=xndup(cc,ccl-1);rtrim(cond_src);Expr*ec=parse_expr_s(cond_src);free(cond_src);
+                            if(!ec){free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                            size_t ebs=*idx+1,ebe=blk_end(lines,ebs,lim,ind+4);
+                            if(ebs==ebe){free_expr(ec);free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);ERR("else if needs body");goto done;}
+                            Stmt**etb=NULL;size_t etc=0;
+                            if(!parse_block(lines,ebs,ebe,ind+4,&etb,&etc)){free_expr(ec);free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                            Stmt*node=calloc(1,sizeof(Stmt));
+                            if(!node){free_expr(ec);for(size_t i=0;i<etc;i++)free_stmt(etb[i]);free(etb);free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                            node->kind=SK_IF;node->cond=ec;node->then=etb;node->nthen=etc;
+                            if(!chain_root){chain_root=node;chain_tail=node;}else{chain_tail->els=malloc(sizeof(Stmt*));if(!chain_tail->els){free_stmt(node);free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}chain_tail->els[0]=node;chain_tail->nels=1;chain_tail=node;}
+                            *idx=ebe;
+                            while(*idx<lim){char*sp=xdup(lines->items[*idx]);rtrim(sp);if(!blank(sp)){free(sp);break;}free(sp);(*idx)++;}
+                            free(line);
+                            continue;
+                        }
+                        if(strcmp(line,"else:")==0&&chain_tail){
+                            size_t ebs=*idx+1,ebe=blk_end(lines,ebs,lim,ind+4);
+                            Stmt**etb=NULL;size_t etc=0;
+                            if(ebs<ebe&&!parse_block(lines,ebs,ebe,ind+4,&etb,&etc)){free(line);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);free_stmt(chain_root);goto done;}
+                            chain_tail->els=etb;chain_tail->nels=etc;
+                            *idx=ebe;
+                            free(line);
+                            break;
+                        }
+                        free(line);
+                        break;
+                    }
+                    if(chain_root){
+                        eb=malloc(sizeof(Stmt*));
+                        if(!eb){free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);free_stmt(chain_root);goto done;}
+                        eb[0]=chain_root;ec=1;
+                    }
+                }
+                free(ec2);
+            }
+        }
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(cond);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);for(size_t i=0;i<ec;i++)free_stmt(eb[i]);free(eb);goto done;}
         st->kind=SK_IF;st->cond=cond;st->then=tb;st->nthen=tc;st->els=eb;st->nels=ec;res=st;goto done;
     }
@@ -274,15 +331,15 @@ static bool cg_expr_into(CG*g,Expr*e,const Program*prog,size_t tmp){
         if(!cg_expr_into(g,e->right,prog,rt))return false;
         const char*op=e->op;
         if(strcmp(op,"+")==0)     E(g,"    aut_val _tmp%zu = aut_add(_tmp%zu, _tmp%zu);\n",tmp,lt,rt);
-        else if(strcmp(op,"-")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) - aut_to_int(_tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"*")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) * aut_to_int(_tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"/")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) / aut_to_int(_tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,"-")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"-\", _tmp%zu) - aut_expect_int(\"-\", _tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,"*")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"*\", _tmp%zu) * aut_expect_int(\"*\", _tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,"/")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"/\", _tmp%zu) / aut_expect_int(\"/\", _tmp%zu));\n",tmp,lt,rt);
         else if(strcmp(op,"==")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_eq(_tmp%zu, _tmp%zu));\n",tmp,lt,rt);
         else if(strcmp(op,"!=")==0)E(g,"    aut_val _tmp%zu = aut_int(!aut_eq(_tmp%zu, _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"<")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) < aut_to_int(_tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,">")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) > aut_to_int(_tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"<=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) <= aut_to_int(_tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,">=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_to_int(_tmp%zu) >= aut_to_int(_tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,"<")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"<\", _tmp%zu) < aut_expect_int(\"<\", _tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,">")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\">\", _tmp%zu) > aut_expect_int(\">\", _tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,"<=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"<=\", _tmp%zu) <= aut_expect_int(\"<=\", _tmp%zu));\n",tmp,lt,rt);
+        else if(strcmp(op,">=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\">=\", _tmp%zu) >= aut_expect_int(\">=\", _tmp%zu));\n",tmp,lt,rt);
         else{ERR("unknown op: %s",op);free(0);return false;}
         E(g,"    aut_free(_tmp%zu); aut_free(_tmp%zu);\n",lt,rt);
         return true;
@@ -407,7 +464,14 @@ static const char*RUNTIME =
 "    char *s = strdup(v.sval ? v.sval : \"\");\n"
 "    return aut_str_heap(s);\n"
 "}\n"
-"static long long aut_to_int(aut_val v) { return v.type==0 ? v.ival : 0; }\n"
+"static const char* aut_type_name(aut_val v) { return v.type==0 ? \"int\" : \"str\"; }\n"
+"static long long aut_expect_int(const char *op, aut_val v) {\n"
+"    if(v.type!=0) {\n"
+"        fprintf(stderr, \"TypeError: operator %s expects int, got %s\\n\", op, aut_type_name(v));\n"
+"        exit(1);\n"
+"    }\n"
+"    return v.ival;\n"
+"}\n"
 "static int aut_truthy(aut_val v) {\n"
 "    if(v.type==0) return v.ival!=0;\n"
 "    return v.sval && v.sval[0]!=0;\n"
@@ -419,12 +483,15 @@ static const char*RUNTIME =
 "}\n"
 "static aut_val aut_add(aut_val a, aut_val b) {\n"
 "    if(a.type==0 && b.type==0) return aut_int(a.ival+b.ival);\n"
-"    /* string concat */\n"
+"    if(a.type!=0 && b.type!=0) {\n"
 "    const char *sa = (a.type!=0 && a.sval) ? a.sval : \"\";\n"
 "    const char *sb = (b.type!=0 && b.sval) ? b.sval : \"\";\n"
 "    size_t la=strlen(sa), lb=strlen(sb);\n"
 "    char *r=malloc(la+lb+1); memcpy(r,sa,la); memcpy(r+la,sb,lb); r[la+lb]=0;\n"
 "    return aut_str_heap(r);\n"
+"    }\n"
+"    fprintf(stderr, \"TypeError: cannot add int and str\\n\");\n"
+"    exit(1);\n"
 "}\n"
 "static void aut_print(aut_val v) {\n"
 "    if(v.type==0) printf(\"%lld\\n\", v.ival);\n"
@@ -443,6 +510,7 @@ static const char*RUNTIME =
 
 static bool codegen(const Program*prog,const char*out_path){
     CG g;cg_init(&g);
+    sb_fmt(&g.out,"/* AutismLang v%s | backend=%s */\n",AUTISMLANG_VERSION,AUTISMLANG_BACKEND);
     sb_cat(&g.out,RUNTIME);
     /* forward declarations */
     for(size_t i=0;i<prog->nfns;i++){
@@ -469,9 +537,32 @@ static bool codegen(const Program*prog,const char*out_path){
 }
 
 int main(int argc,char**argv){
-    if(argc<2){fprintf(stderr,"Usage: %s <input.aut> [-o output.c]\n",argv[0]);return 1;}
-    const char*in=argv[1],*out="build/out.c";
-    for(int i=2;i<argc;i++){if(strcmp(argv[i],"-o")==0&&i+1<argc)out=argv[++i];else{fprintf(stderr,"Usage: %s <input.aut> [-o output.c]\n",argv[0]);return 1;}}
+    const char*in=NULL,*out="build/out.c";
+    for(int i=1;i<argc;i++){
+        if(strcmp(argv[i],"--help")==0){
+            printf("Usage: %s <input.aut> [-o output.c] [--help] [--version] [--metadata]\\n",argv[0]);
+            printf("Backend: %s\\n",AUTISMLANG_BACKEND);
+            return 0;
+        }else if(strcmp(argv[i],"--version")==0){
+            printf("AutismLang Compiler %s (backend=%s)\\n",AUTISMLANG_VERSION,AUTISMLANG_BACKEND);
+            return 0;
+        }else if(strcmp(argv[i],"--metadata")==0){
+            printf("{\\\"version\\\":\\\"%s\\\",\\\"backend\\\":\\\"%s\\\"}\\n",AUTISMLANG_VERSION,AUTISMLANG_BACKEND);
+            return 0;
+        }else if(strcmp(argv[i],"-o")==0){
+            if(i+1>=argc){fprintf(stderr,"Usage: %s <input.aut> [-o output.c]\\n",argv[0]);return 1;}
+            out=argv[++i];
+        }else if(argv[i][0]=='-'){
+            fprintf(stderr,"Unknown option: %s\\n",argv[i]);
+            return 1;
+        }else if(!in){
+            in=argv[i];
+        }else{
+            fprintf(stderr,"Only one input file is allowed.\\n");
+            return 1;
+        }
+    }
+    if(!in){fprintf(stderr,"Usage: %s <input.aut> [-o output.c] [--help] [--version] [--metadata]\\n",argv[0]);return 1;}
     char*src=read_file(in);if(!src)return 1;
     SList lines;sl_init(&lines);if(!split_lines(src,&lines)){free(src);return 1;}free(src);
     Program prog;if(!parse_program(&lines,&prog)){sl_free(&lines);return 1;}

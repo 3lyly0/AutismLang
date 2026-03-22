@@ -1,0 +1,16 @@
+fn main():
+    i = 0
+    total = 0
+
+    while i < 7:
+        i = i + 1
+
+        if i == 3:
+            continue
+
+        if i == 6:
+            break
+
+        total = total + i
+
+    print(total)

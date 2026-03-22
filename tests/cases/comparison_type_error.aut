@@ -1,0 +1,6 @@
+fn main():
+    left = "7"
+    right = 3
+
+    if left < right:
+        print("bad")

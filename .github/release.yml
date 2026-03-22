@@ -1,0 +1,30 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+    - title: Compiler and Runtime
+      labels:
+        - compiler
+        - runtime
+        - backend
+    - title: Language Features
+      labels:
+        - language
+        - parser
+        - syntax
+    - title: Build and CI
+      labels:
+        - ci
+        - build
+        - release
+    - title: Tests and Docs
+      labels:
+        - tests
+        - docs
+    - title: Other Changes
+      labels:
+        - "*"

@@ -1,0 +1,14 @@
+{
+  "name": "AutismLang",
+  "version": "0.0.1",
+  "backend": "c",
+  "stage": "bootstrap",
+  "updated_at": "2026-03-22",
+  "release_notes": [
+    "Added else if syntax",
+    "Added boolean literals True/False and true/false",
+    "Hardened runtime type checks for arithmetic/comparisons",
+    "Added CLI flags: --help, --version, --metadata",
+    "Added basic automated tests"
+  ]
+}
