@@ -33,6 +33,10 @@ fn main():
 - `else:` blocks after `if`
 - `while condition:` loops
 - Function parameters and calls, for example: `fn greet(name): ...` then `greet("Neo")`
+- `return expression` from functions (default return is `0` when omitted)
+- Function calls inside expressions, for example: `x = add(2, 3) * 4`
+- `break` and `continue` inside `while` loops
+- Builtin `input()` / `input("prompt")` (compile-time input)
 - Inline comments using `#` at the end of code lines
 - Condition operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Compiles to x86_64 Linux NASM assembly
