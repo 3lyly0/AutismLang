@@ -1,8 +1,5 @@
 name: Release
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 on:
   push:
     tags:
@@ -16,6 +13,8 @@ jobs:
   build-assets:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     strategy:
       fail-fast: false
       matrix:
@@ -95,6 +94,8 @@ jobs:
     name: publish-release
     runs-on: ubuntu-latest
     needs: build-assets
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
