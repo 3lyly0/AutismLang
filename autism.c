@@ -59,7 +59,8 @@ static char*read_file(const char*path){
     FILE*f=fopen(path,"rb");if(!f){fprintf(stderr,"Cannot open '%s'\n",path);return NULL;}
     fseek(f,0,SEEK_END);long sz=ftell(f);fseek(f,0,SEEK_SET);
     char*buf=malloc((size_t)sz+1);if(!buf){fclose(f);return NULL;}
-    fread(buf,1,(size_t)sz,f);buf[sz]=0;fclose(f);return buf;
+    if(fread(buf,1,(size_t)sz,f)!=(size_t)sz){fclose(f);free(buf);fprintf(stderr,"Failed to read '%s'\n",path);return NULL;}
+    buf[sz]=0;fclose(f);return buf;
 }
 static bool split_lines(const char*src,SList*out){
     const char*p=src,*start=src;
@@ -491,6 +492,9 @@ static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog){
     }
 }
 
+/* Forward declaration for type_check_stmts */
+static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop);
+
 static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop){
     switch(s->kind){
     case SK_PRINT:{
@@ -849,7 +853,7 @@ static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size
     return true;
 }
 
-static bool cg_fn(CG*g,FnDef*fn,Program*prog){
+static bool cg_fn(CG*g,FnDef*fn,const Program*prog){
     (void)prog;
     E(g,"static %s _fn_%s(",cg_type(fn->return_type),fn->name);
     for(size_t i=0;i<fn->nparams;i++){
