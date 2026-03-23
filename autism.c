@@ -1,6 +1,12 @@
 /*
- * AutismLang Compiler v0.1.0 - outputs C code instead of ASM
+ * AutismLang Compiler v0.2.0 - Static typed systems language
  * Build output: gcc out.c -o out.exe
+ * 
+ * Changes from v0.1.0:
+ * - Removed dynamic typing (aut_val)
+ * - Added static types: int (64-bit), ptr, bool
+ * - Compile-time type checking
+ * - Raw C code generation without runtime wrappers
  */
 #include <ctype.h>
 #include <errno.h>
@@ -17,8 +23,8 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
-#define AUTISMLANG_VERSION "0.1.0"
-#define AUTISMLANG_BACKEND "c"
+#define AUTISMLANG_VERSION "0.2.0"
+#define AUTISMLANG_BACKEND "c-static"
 
 /* ---- helpers ---- */
 static char g_err[512];
@@ -74,32 +80,110 @@ static size_t blk_end(const SList*lines,size_t start,size_t lim,size_t ind){
     return i;
 }
 
-/* ---- AST ---- */
-typedef enum{EK_INT,EK_STR,EK_VAR,EK_BINOP,EK_CALL,EK_INPUT,EK_INT_CAST,EK_STR_CAST,EK_RANGE}EK;
-typedef struct Expr{EK kind;long long ival;char*sval,*name,*fn;char op[3];struct Expr*left,*right,**args;size_t argc;}Expr;
-typedef enum{SK_PRINT,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
-typedef struct Stmt{SK kind;char*var;Expr*expr,*cond;struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
+/* ======================================================
+ * TYPE SYSTEM
+ * ====================================================== */
+typedef enum {
+    TYPE_UNKNOWN = 0,
+    TYPE_INT,       /* 64-bit integer */
+    TYPE_PTR,       /* raw pointer */
+    TYPE_BOOL,      /* boolean */
+    TYPE_VOID       /* void (for functions) */
+} TypeKind;
+
+static const char* type_name(TypeKind t) {
+    switch(t) {
+        case TYPE_INT: return "int";
+        case TYPE_PTR: return "ptr";
+        case TYPE_BOOL: return "bool";
+        case TYPE_VOID: return "void";
+        default: return "unknown";
+    }
+}
+
+/* ======================================================
+ * AST WITH TYPE INFORMATION
+ * ====================================================== */
+typedef enum{EK_INT,EK_BOOL,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST}EK;
+typedef struct Expr{EK kind;TypeKind type;long long ival;char*sval;char*name;char*fn;char op[3];struct Expr*left,*right,**args;size_t argc;}Expr;
+typedef enum{SK_PRINT,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL,SK_VAR_DECL}SK;
+typedef struct Stmt{SK kind;char*var;TypeKind var_type;Expr*expr,*cond;struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
     char*loop_var;
     Expr*range_start,*range_end,*range_step;
 }Stmt;
-typedef struct{char*name;char**params;size_t nparams;Stmt**body;size_t nbody;}FnDef;
+typedef struct{char*name;char**params;TypeKind*param_types;TypeKind return_type;Stmt**body;size_t nbody;size_t nparams;}FnDef;
 typedef struct{FnDef*fns;size_t nfns,cap;}Program;
 
 static void free_expr(Expr*e){if(!e)return;free(e->sval);free(e->name);free(e->fn);free_expr(e->left);free_expr(e->right);for(size_t i=0;i<e->argc;i++)free_expr(e->args[i]);free(e->args);free(e);}
 static void free_stmt(Stmt*s){if(!s)return;free(s->var);free_expr(s->expr);free_expr(s->cond);for(size_t i=0;i<s->nthen;i++)free_stmt(s->then[i]);free(s->then);for(size_t i=0;i<s->nels;i++)free_stmt(s->els[i]);free(s->els);for(size_t i=0;i<s->nloop;i++)free_stmt(s->loop[i]);free(s->loop);free(s->loop_var);free_expr(s->range_start);free_expr(s->range_end);free_expr(s->range_step);free(s);}
-static void free_fn(FnDef*f){if(!f)return;free(f->name);for(size_t i=0;i<f->nparams;i++)free(f->params[i]);free(f->params);for(size_t i=0;i<f->nbody;i++)free_stmt(f->body[i]);free(f->body);}
+static void free_fn(FnDef*f){if(!f)return;free(f->name);for(size_t i=0;i<f->nparams;i++)free(f->params[i]);free(f->params);free(f->param_types);for(size_t i=0;i<f->nbody;i++)free_stmt(f->body[i]);free(f->body);}
 static void free_program(Program*p){for(size_t i=0;i<p->nfns;i++)free_fn(&p->fns[i]);free(p->fns);}
 
-/* ---- parser ---- */
+/* ======================================================
+ * SYMBOL TABLE FOR TYPE CHECKING
+ * ====================================================== */
+typedef struct Symbol {
+    char* name;
+    TypeKind type;
+    int is_param;
+} Symbol;
+
+typedef struct Scope {
+    Symbol* syms;
+    size_t count, cap;
+    struct Scope* parent;
+} Scope;
+
+static void scope_init(Scope* sc, Scope* parent) {
+    sc->syms = NULL;
+    sc->count = 0;
+    sc->cap = 0;
+    sc->parent = parent;
+}
+
+static void scope_free(Scope* sc) {
+    for(size_t i = 0; i < sc->count; i++) free(sc->syms[i].name);
+    free(sc->syms);
+    sc->syms = NULL;
+    sc->count = 0;
+    sc->cap = 0;
+}
+
+static Symbol* scope_find(Scope* sc, const char* name) {
+    for(size_t i = 0; i < sc->count; i++) {
+        if(strcmp(sc->syms[i].name, name) == 0) return &sc->syms[i];
+    }
+    if(sc->parent) return scope_find(sc->parent, name);
+    return NULL;
+}
+
+static bool scope_add(Scope* sc, const char* name, TypeKind type, int is_param) {
+    for(size_t i = 0; i < sc->count; i++) {
+        if(strcmp(sc->syms[i].name, name) == 0) {
+            ERR("variable '%s' already declared", name);
+            return false;
+        }
+    }
+    if(sc->count == sc->cap) {
+        size_t nc = sc->cap ? sc->cap * 2 : 8;
+        Symbol* np = realloc(sc->syms, nc * sizeof(Symbol));
+        if(!np) return false;
+        sc->syms = np;
+        sc->cap = nc;
+    }
+    sc->syms[sc->count].name = xdup(name);
+    sc->syms[sc->count].type = type;
+    sc->syms[sc->count].is_param = is_param;
+    sc->count++;
+    return true;
+}
+
+/* ======================================================
+ * PARSER
+ * ====================================================== */
 static Expr*parse_expr(const char**pp);
 static void skip(const char**pp){while(**pp&&isspace((unsigned char)**pp))(*pp)++;}
-static char*parse_str_lit(const char**pp){
-    if(**pp!='"'){ERR("expected '\"'");return NULL;}(*pp)++;
-    SBuf b;sb_init(&b);
-    while(**pp&&**pp!='"'){char c=**pp;if(c=='\\'){(*pp)++;switch(**pp){case'n':sb_cat(&b,"\n");break;case't':sb_cat(&b,"\t");break;case'r':sb_cat(&b,"\r");break;case'"':sb_cat(&b,"\"");break;case'\\':sb_cat(&b,"\\");break;default:ERR("bad escape \\%c",**pp);sb_free(&b);return NULL;}}else{char t[2]={c,0};sb_cat(&b,t);}(*pp)++;}
-    if(**pp!='"'){ERR("unterminated string");sb_free(&b);return NULL;}(*pp)++;
-    if(!b.d)return xdup("");return b.d;
-}
+
 static bool parse_args(const char**pp,Expr***oa,size_t*on){
     skip(pp);if(**pp!='('){ERR("expected '('");return false;}(*pp)++;
     Expr**args=NULL;size_t n=0,cap=0;skip(pp);
@@ -114,9 +198,9 @@ static bool parse_args(const char**pp,Expr***oa,size_t*on){
 static Expr*parse_factor(const char**pp){
     skip(pp);const char*p=*pp;
     if(*p=='('){(*pp)++;Expr*e=parse_expr(pp);if(!e)return NULL;skip(pp);if(**pp!=')'){free_expr(e);ERR("missing ')'");return NULL;}(*pp)++;return e;}
-    if(*p=='"'){char*s=parse_str_lit(pp);if(!s)return NULL;Expr*e=calloc(1,sizeof(Expr));if(!e){free(s);return NULL;}e->kind=EK_STR;e->sval=s;return e;}
+    if(*p=='"'){ERR("string literals not supported in static-typed mode");return NULL;}
     bool neg=false;if(*p=='-'&&isdigit((unsigned char)p[1])){neg=true;(*pp)++;p++;}
-    if(isdigit((unsigned char)*p)){char*end;long long v=strtoll(*pp,&end,10);*pp=end;Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->ival=neg?-v:v;return e;}(void)neg;
+    if(isdigit((unsigned char)*p)){char*end;long long v=strtoll(*pp,&end,10);*pp=end;Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->type=TYPE_INT;e->ival=neg?-v:v;return e;}(void)neg;
     if(is_ic(*p)){
         char id[128];size_t n=0;while(is_icc(**pp)){if(n+1>=sizeof(id)){ERR("ident too long");return NULL;}id[n++]=**pp;(*pp)++;}id[n]=0;skip(pp);
         if(**pp=='('){
@@ -126,22 +210,15 @@ static Expr*parse_factor(const char**pp){
                 if(e->argc!=1){ERR("int() takes exactly 1 arg");free_expr(e);return NULL;}
                 return e;
             }
-            if(strcmp(id,"str")==0){
-                Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_STR_CAST;
-                if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}
-                if(e->argc!=1){ERR("str() takes exactly 1 arg");free_expr(e);return NULL;}
-                return e;
-            }
             if(strcmp(id,"range")==0){
-                Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_RANGE;
-                if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}
-                if(e->argc<1||e->argc>3){ERR("range() takes 1-3 args");free_expr(e);return NULL;}
-                return e;
+                ERR("range() can only be used in for-in loop");
+                return NULL;
             }
-            Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=(strcmp(id,"input")==0)?EK_INPUT:EK_CALL;e->fn=xdup(id);if(!parse_args(pp,&e->args,&e->argc)){free_expr(e);return NULL;}if(e->kind==EK_INPUT&&e->argc>1){ERR("input() takes 0 or 1 arg");free_expr(e);return NULL;}return e;
+            Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_CALL;e->fn=xdup(id);if(!parse_args(pp,&e->args,&e->argc)){free_expr(e);return NULL;}return e;
         }
-        if(strcmp(id,"True")==0||strcmp(id,"true")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->ival=1;return e;}
-        if(strcmp(id,"False")==0||strcmp(id,"false")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->ival=0;return e;}
+        if(strcmp(id,"True")==0||strcmp(id,"true")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=TYPE_BOOL;e->ival=1;return e;}
+        if(strcmp(id,"False")==0||strcmp(id,"false")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=TYPE_BOOL;e->ival=0;return e;}
+        if(strcmp(id,"null")==0||strcmp(id,"NULL")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_PTR_NULL;e->type=TYPE_PTR;return e;}
         Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_VAR;e->name=xdup(id);return e;
     }
     ERR("unexpected '%c'",(int)*p);return NULL;
@@ -177,7 +254,7 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         const char*rp=fs+5;
         Expr**args;size_t ac;
         Expr*range_expr=calloc(1,sizeof(Expr));if(!range_expr)goto done;
-        range_expr->kind=EK_RANGE;
+        range_expr->kind=EK_BINOP;
         const char*tmp=rp;
         if(!parse_args(&tmp,&range_expr->args,&range_expr->argc)){free_expr(range_expr);goto done;}
         skip(&tmp);
@@ -194,13 +271,13 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         st->loop_var=xdup(varname);
         st->loop=lb;st->nloop=lc;
         if(range_expr->argc==1){
-            st->range_start=calloc(1,sizeof(Expr));st->range_start->kind=EK_INT;st->range_start->ival=0;
+            st->range_start=calloc(1,sizeof(Expr));st->range_start->kind=EK_INT;st->range_start->type=TYPE_INT;st->range_start->ival=0;
             st->range_end=range_expr->args[0];
-            st->range_step=calloc(1,sizeof(Expr));st->range_step->kind=EK_INT;st->range_step->ival=1;
+            st->range_step=calloc(1,sizeof(Expr));st->range_step->kind=EK_INT;st->range_step->type=TYPE_INT;st->range_step->ival=1;
         }else if(range_expr->argc==2){
             st->range_start=range_expr->args[0];
             st->range_end=range_expr->args[1];
-            st->range_step=calloc(1,sizeof(Expr));st->range_step->kind=EK_INT;st->range_step->ival=1;
+            st->range_step=calloc(1,sizeof(Expr));st->range_step->kind=EK_INT;st->range_step->type=TYPE_INT;st->range_step->ival=1;
         }else{
             st->range_start=range_expr->args[0];
             st->range_end=range_expr->args[1];
@@ -320,14 +397,221 @@ static bool parse_program(const SList*lines,Program*prog){
         size_t bs=i+1,be=blk_end(lines,bs,lines->len,4);if(bs==be){fprintf(stderr,"Error: fn '%s' empty\n",fn_name);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);return false;}
         Stmt**body;size_t bc;if(!parse_block(lines,bs,be,4,&body,&bc)){fprintf(stderr,"Error in '%s': %s\n",fn_name,g_err);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);return false;}
         if(prog->nfns==prog->cap){size_t nc=prog->cap?prog->cap*2:4;FnDef*np=realloc(prog->fns,nc*sizeof(FnDef));if(!np){free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);for(size_t j=0;j<bc;j++)free_stmt(body[j]);free(body);return false;}prog->fns=np;prog->cap=nc;}
-        FnDef*fn=&prog->fns[prog->nfns++];fn->name=fn_name;fn->params=params;fn->nparams=pc;fn->body=body;fn->nbody=bc;
+        FnDef*fn=&prog->fns[prog->nfns++];fn->name=fn_name;fn->params=params;fn->nparams=pc;fn->param_types=calloc(pc,sizeof(TypeKind));fn->return_type=TYPE_INT;fn->body=body;fn->nbody=bc;
         i=be;
     }
     return true;
 }
 
 /* ======================================================
- * C CODE GENERATOR
+ * TYPE CHECKER
+ * ====================================================== */
+static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog);
+
+static FnDef* find_fn(Program*prog,const char*name){
+    for(size_t i=0;i<prog->nfns;i++)if(strcmp(prog->fns[i].name,name)==0)return &prog->fns[i];
+    return NULL;
+}
+
+static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog){
+    if(!e)return TYPE_VOID;
+    switch(e->kind){
+    case EK_INT:
+        e->type=TYPE_INT;
+        return TYPE_INT;
+    case EK_BOOL:
+        e->type=TYPE_BOOL;
+        return TYPE_BOOL;
+    case EK_PTR_NULL:
+        e->type=TYPE_PTR;
+        return TYPE_PTR;
+    case EK_VAR:{
+        Symbol*sym=scope_find(sc,e->name);
+        if(!sym){ERR("undefined variable '%s'",e->name);return TYPE_UNKNOWN;}
+        e->type=sym->type;
+        return sym->type;
+    }
+    case EK_INT_CAST:{
+        if(e->argc!=1)return TYPE_UNKNOWN;
+        TypeKind arg_type=type_check_expr(e->args[0],sc,prog);
+        if(arg_type==TYPE_UNKNOWN)return TYPE_UNKNOWN;
+        e->type=TYPE_INT;
+        return TYPE_INT;
+    }
+    case EK_CALL:{
+        FnDef*fn=find_fn(prog,e->fn);
+        if(!fn){ERR("undefined function '%s'",e->fn);return TYPE_UNKNOWN;}
+        if(fn->nparams!=e->argc){ERR("function '%s' expects %zu args, got %zu",e->fn,fn->nparams,e->argc);return TYPE_UNKNOWN;}
+        for(size_t i=0;i<e->argc;i++){
+            TypeKind at=type_check_expr(e->args[i],sc,prog);
+            if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;
+            if(at!=fn->param_types[i]&&!(at==TYPE_BOOL&&fn->param_types[i]==TYPE_INT)){
+                ERR("argument %zu: expected %s, got %s",i+1,type_name(fn->param_types[i]),type_name(at));
+                return TYPE_UNKNOWN;
+            }
+        }
+        e->type=fn->return_type;
+        return fn->return_type;
+    }
+    case EK_BINOP:{
+        TypeKind lt=type_check_expr(e->left,sc,prog);
+        TypeKind rt=type_check_expr(e->right,sc,prog);
+        if(lt==TYPE_UNKNOWN||rt==TYPE_UNKNOWN)return TYPE_UNKNOWN;
+        const char*op=e->op;
+        if(strcmp(op,"+")==0||strcmp(op,"-")==0||strcmp(op,"*")==0||strcmp(op,"/")==0){
+            if(lt!=TYPE_INT||rt!=TYPE_INT){
+                ERR("operator '%s' requires int operands, got %s and %s",op,type_name(lt),type_name(rt));
+                return TYPE_UNKNOWN;
+            }
+            e->type=TYPE_INT;
+            return TYPE_INT;
+        }
+        if(strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0){
+            if(lt!=TYPE_INT||rt!=TYPE_INT){
+                ERR("comparison '%s' requires int operands, got %s and %s",op,type_name(lt),type_name(rt));
+                return TYPE_UNKNOWN;
+            }
+            e->type=TYPE_BOOL;
+            return TYPE_BOOL;
+        }
+        if(strcmp(op,"==")==0||strcmp(op,"!=")==0){
+            if(lt!=rt&&!(lt==TYPE_BOOL&&rt==TYPE_INT)&&!(lt==TYPE_INT&&rt==TYPE_BOOL)){
+                ERR("equality '%s' requires matching types, got %s and %s",op,type_name(lt),type_name(rt));
+                return TYPE_UNKNOWN;
+            }
+            e->type=TYPE_BOOL;
+            return TYPE_BOOL;
+        }
+        ERR("unknown operator '%s'",op);
+        return TYPE_UNKNOWN;
+    }
+    default:
+        ERR("unknown expression kind");
+        return TYPE_UNKNOWN;
+    }
+}
+
+static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop){
+    switch(s->kind){
+    case SK_PRINT:{
+        TypeKind t=type_check_expr(s->expr,sc,prog);
+        if(t==TYPE_UNKNOWN)return false;
+        if(t!=TYPE_INT&&t!=TYPE_BOOL){
+            ERR("print only supports int and bool, got %s",type_name(t));
+            return false;
+        }
+        return true;
+    }
+    case SK_ASSIGN:{
+        Symbol*sym=scope_find(sc,s->var);
+        if(!sym){
+            TypeKind t=type_check_expr(s->expr,sc,prog);
+            if(t==TYPE_UNKNOWN)return false;
+            if(!scope_add(sc,s->var,t,0))return false;
+            s->var_type=t;
+        }else{
+            TypeKind t=type_check_expr(s->expr,sc,prog);
+            if(t==TYPE_UNKNOWN)return false;
+            if(t!=sym->type&&!(t==TYPE_BOOL&&sym->type==TYPE_INT)){
+                ERR("cannot assign %s to variable '%s' of type %s",type_name(t),s->var,type_name(sym->type));
+                return false;
+            }
+            s->var_type=sym->type;
+        }
+        return true;
+    }
+    case SK_IF:{
+        TypeKind ct=type_check_expr(s->cond,sc,prog);
+        if(ct==TYPE_UNKNOWN)return false;
+        if(ct!=TYPE_INT&&ct!=TYPE_BOOL){
+            ERR("condition must be int or bool, got %s",type_name(ct));
+            return false;
+        }
+        Scope inner;scope_init(&inner,sc);
+        if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop)){scope_free(&inner);return false;}
+        scope_free(&inner);
+        if(s->nels>0){
+            Scope e_scope;scope_init(&e_scope,sc);
+            if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop)){scope_free(&e_scope);return false;}
+            scope_free(&e_scope);
+        }
+        return true;
+    }
+    case SK_WHILE:{
+        TypeKind ct=type_check_expr(s->cond,sc,prog);
+        if(ct==TYPE_UNKNOWN)return false;
+        if(ct!=TYPE_INT&&ct!=TYPE_BOOL){
+            ERR("condition must be int or bool, got %s",type_name(ct));
+            return false;
+        }
+        Scope inner;scope_init(&inner,sc);
+        if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}
+        scope_free(&inner);
+        return true;
+    }
+    case SK_FOR:{
+        TypeKind st=type_check_expr(s->range_start,sc,prog);
+        if(st!=TYPE_INT){ERR("range start must be int");return false;}
+        TypeKind et=type_check_expr(s->range_end,sc,prog);
+        if(et!=TYPE_INT){ERR("range end must be int");return false;}
+        TypeKind stp=type_check_expr(s->range_step,sc,prog);
+        if(stp!=TYPE_INT){ERR("range step must be int");return false;}
+        Scope inner;scope_init(&inner,sc);
+        if(!scope_add(&inner,s->loop_var,TYPE_INT,0)){scope_free(&inner);return false;}
+        if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}
+        scope_free(&inner);
+        return true;
+    }
+    case SK_RETURN:{
+        if(s->expr){
+            TypeKind t=type_check_expr(s->expr,sc,prog);
+            if(t==TYPE_UNKNOWN)return false;
+        }
+        return true;
+    }
+    case SK_BREAK:
+    case SK_CONTINUE:
+        if(!in_loop){ERR("'%s' outside loop",s->kind==SK_BREAK?"break":"continue");return false;}
+        return true;
+    case SK_CALL:{
+        TypeKind t=type_check_expr(s->expr,sc,prog);
+        return t!=TYPE_UNKNOWN;
+    }
+    default:
+        return true;
+    }
+}
+
+static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop){
+    for(size_t i=0;i<count;i++){
+        if(!type_check_stmt(stmts[i],sc,prog,in_loop))return false;
+    }
+    return true;
+}
+
+static bool type_check_fn(FnDef*fn,Program*prog){
+    Scope sc;scope_init(&sc,NULL);
+    for(size_t i=0;i<fn->nparams;i++){
+        fn->param_types[i]=TYPE_INT;
+        if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}
+    }
+    if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false)){scope_free(&sc);return false;}
+    scope_free(&sc);
+    return true;
+}
+
+static bool type_check_program(Program*prog){
+    for(size_t i=0;i<prog->nfns;i++){
+        if(!type_check_fn(&prog->fns[i],prog)){
+            fprintf(stderr,"Type error in '%s': %s\n",prog->fns[i].name,g_err);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* ======================================================
+ * C CODE GENERATOR (Static Types)
  * ====================================================== */
 typedef struct{SBuf out;size_t lbl;}CG;
 static void cg_init(CG*g){sb_init(&g->out);g->lbl=0;}
@@ -335,324 +619,290 @@ static void cg_free(CG*g){sb_free(&g->out);}
 static size_t L(CG*g){return g->lbl++;}
 static void E(CG*g,const char*fmt,...){char tmp[1024];va_list ap;va_start(ap,fmt);vsnprintf(tmp,sizeof(tmp),fmt,ap);va_end(ap);sb_cat(&g->out,tmp);}
 
-static void emit_c_str(CG*g,const char*s){
-    E(g,"\"");
-    for(size_t i=0;s[i];i++){
-        unsigned char c=(unsigned char)s[i];
-        if(c=='"')E(g,"\\\"");
-        else if(c=='\\')E(g,"\\\\");
-        else if(c=='\n')E(g,"\\n");
-        else if(c=='\r')E(g,"\\r");
-        else if(c=='\t')E(g,"\\t");
-        else if(c<32||c>126){char t[8];snprintf(t,sizeof(t),"\\x%02x",c);E(g,"%s",t);}
-        else{char t[2]={(char)c,0};E(g,"%s",t);}
+static const char* cg_type(TypeKind t){
+    switch(t){
+        case TYPE_INT: return "long long";
+        case TYPE_PTR: return "void*";
+        case TYPE_BOOL: return "int";
+        case TYPE_VOID: return "void";
+        default: return "long long";
     }
-    E(g,"\"");
 }
 
-static bool cg_expr(CG*g,Expr*e,const Program*prog);
-static bool cg_stmts(CG*g,Stmt**s,size_t n,const Program*prog,bool inlp);
+static bool cg_expr(CG*g,Expr*e);
+static bool cg_stmts(CG*g,Stmt**s,size_t n,bool inlp);
 
-static bool cg_expr_into(CG*g,Expr*e,const Program*prog,size_t tmp){
+static bool cg_expr_val(CG*g,Expr*e,SBuf*result){
     switch(e->kind){
     case EK_INT:
-        E(g,"    aut_val _tmp%zu = aut_int(%lld);\n",tmp,e->ival);
+        sb_fmt(result,"%lld",e->ival);
         return true;
-    case EK_STR:
-        E(g,"    aut_val _tmp%zu = aut_str_static(",tmp);
-        emit_c_str(g,e->sval);
-        E(g,");\n");
+    case EK_BOOL:
+        sb_cat(result,e->ival?"1":"0");
+        return true;
+    case EK_PTR_NULL:
+        sb_cat(result,"NULL");
         return true;
     case EK_VAR:
-        E(g,"    aut_val _tmp%zu = aut_copy(%s);\n",tmp,e->name);
+        sb_cat(result,e->name);
         return true;
-    case EK_INPUT:{
-        if(e->argc==1){
-            size_t pt=L(g);
-            if(!cg_expr_into(g,e->args[0],prog,pt))return false;
-            E(g,"    aut_print(_tmp%zu);\n",pt);
-            E(g,"    aut_free(_tmp%zu);\n",pt);
-        }
-        E(g,"    aut_val _tmp%zu = aut_input();\n",tmp);
-        return true;
-    }
     case EK_INT_CAST:{
-        if(e->argc!=1)return false;
-        size_t at=L(g);
-        if(!cg_expr_into(g,e->args[0],prog,at))return false;
-        E(g,"    aut_val _tmp%zu = aut_to_int(_tmp%zu);\n",tmp,at);
-        E(g,"    aut_free(_tmp%zu);\n",at);
-        return true;
-    }
-    case EK_STR_CAST:{
-        if(e->argc!=1)return false;
-        size_t at=L(g);
-        if(!cg_expr_into(g,e->args[0],prog,at))return false;
-        E(g,"    aut_val _tmp%zu = aut_to_str(_tmp%zu);\n",tmp,at);
-        E(g,"    aut_free(_tmp%zu);\n",at);
+        SBuf arg;sb_init(&arg);
+        if(!cg_expr_val(g,e->args[0],&arg)){sb_free(&arg);return false;}
+        sb_fmt(result,"((long long)(%s))",arg.d);
+        sb_free(&arg);
         return true;
     }
     case EK_CALL:{
-        FnDef*fn=NULL;for(size_t i=0;i<prog->nfns;i++)if(strcmp(prog->fns[i].name,e->fn)==0){fn=&prog->fns[i];break;}
-        if(!fn){ERR("unknown fn: %s",e->fn);return false;}
-        if(fn->nparams!=e->argc){ERR("'%s' expects %zu args",e->fn,fn->nparams);return false;}
-        size_t*tmps=malloc(e->argc*sizeof(size_t));if(!tmps)return false;
-        for(size_t i=0;i<e->argc;i++){tmps[i]=L(g);if(!cg_expr_into(g,e->args[i],prog,tmps[i])){free(tmps);return false;}}
-        E(g,"    aut_val _tmp%zu = _fn_%s(",tmp,e->fn);
-        for(size_t i=0;i<e->argc;i++){if(i)E(g,", ");E(g,"_tmp%zu",tmps[i]);}
-        E(g,");\n");
-        for(size_t i=0;i<e->argc;i++)E(g,"    aut_free(_tmp%zu);\n",tmps[i]);
-        free(tmps);
+        SBuf*args=malloc(e->argc*sizeof(SBuf));
+        for(size_t i=0;i<e->argc;i++){
+            sb_init(&args[i]);
+            if(!cg_expr_val(g,e->args[i],&args[i])){
+                for(size_t j=0;j<=i;j++)sb_free(&args[j]);
+                free(args);
+                return false;
+            }
+        }
+        sb_fmt(result,"_fn_%s(",e->fn);
+        for(size_t i=0;i<e->argc;i++){
+            if(i)sb_cat(result,", ");
+            sb_cat(result,args[i].d);
+            sb_free(&args[i]);
+        }
+        sb_cat(result,")");
+        free(args);
         return true;
     }
     case EK_BINOP:{
-        size_t lt=L(g),rt=L(g);
-        if(!cg_expr_into(g,e->left,prog,lt))return false;
-        if(!cg_expr_into(g,e->right,prog,rt))return false;
+        SBuf left,right;sb_init(&left);sb_init(&right);
+        if(!cg_expr_val(g,e->left,&left)){sb_free(&left);sb_free(&right);return false;}
+        if(!cg_expr_val(g,e->right,&right)){sb_free(&left);sb_free(&right);return false;}
         const char*op=e->op;
-        if(strcmp(op,"+")==0)     E(g,"    aut_val _tmp%zu = aut_add(_tmp%zu, _tmp%zu);\n",tmp,lt,rt);
-        else if(strcmp(op,"-")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"-\", _tmp%zu) - aut_expect_int(\"-\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"*")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"*\", _tmp%zu) * aut_expect_int(\"*\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"/")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"/\", _tmp%zu) / aut_expect_int(\"/\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"==")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_eq(_tmp%zu, _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"!=")==0)E(g,"    aut_val _tmp%zu = aut_int(!aut_eq(_tmp%zu, _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"<")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"<\", _tmp%zu) < aut_expect_int(\"<\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,">")==0) E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\">\", _tmp%zu) > aut_expect_int(\">\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,"<=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\"<=\", _tmp%zu) <= aut_expect_int(\"<=\", _tmp%zu));\n",tmp,lt,rt);
-        else if(strcmp(op,">=")==0)E(g,"    aut_val _tmp%zu = aut_int(aut_expect_int(\">=\", _tmp%zu) >= aut_expect_int(\">=\", _tmp%zu));\n",tmp,lt,rt);
-        else{ERR("unknown op: %s",op);return false;}
-        E(g,"    aut_free(_tmp%zu); aut_free(_tmp%zu);\n",lt,rt);
+        if(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0){
+            sb_fmt(result,"(%s %s %s ? 1 : 0)",left.d,op,right.d);
+        }else{
+            sb_fmt(result,"(%s %s %s)",left.d,op,right.d);
+        }
+        sb_free(&left);sb_free(&right);
         return true;
     }
-    case EK_RANGE:
-        ERR("range() can only be used in for-in loop");
+    default:
+        ERR("unknown expression kind in codegen");
         return false;
     }
-    return false;
 }
 
-static bool cg_expr(CG*g,Expr*e,const Program*prog){
-    size_t t=L(g);return cg_expr_into(g,e,prog,t);
+static bool cg_expr(CG*g,Expr*e){
+    SBuf tmp;sb_init(&tmp);
+    bool ok=cg_expr_val(g,e,&tmp);
+    sb_free(&tmp);
+    return ok;
 }
 
-static bool cg_stmts(CG*g,Stmt**stmts,size_t count,const Program*prog,bool inlp){
+static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp){
     for(size_t i=0;i<count;i++){
         Stmt*s=stmts[i];
         switch(s->kind){
         case SK_PRINT:{
-            size_t t=L(g);if(!cg_expr_into(g,s->expr,prog,t))return false;
-            E(g,"    aut_print(_tmp%zu);\n",t);
-            E(g,"    aut_free(_tmp%zu);\n",t);
+            SBuf expr;sb_init(&expr);
+            if(!cg_expr_val(g,s->expr,&expr)){sb_free(&expr);return false;}
+            if(s->expr->type==TYPE_BOOL){
+                E(g,"    printf(\"%%s\\n\", %s ? \"true\" : \"false\");\n",expr.d);
+            }else{
+                E(g,"    printf(\"%%lld\\n\", (long long)(%s));\n",expr.d);
+            }
+            sb_free(&expr);
             break;
         }
         case SK_ASSIGN:{
-            size_t t=L(g);if(!cg_expr_into(g,s->expr,prog,t))return false;
-            E(g,"    aut_free(%s); %s = _tmp%zu;\n",s->var,s->var,t);
+            SBuf expr;sb_init(&expr);
+            if(!cg_expr_val(g,s->expr,&expr)){sb_free(&expr);return false;}
+            E(g,"    %s = %s;\n",s->var,expr.d);
+            sb_free(&expr);
             break;
         }
         case SK_IF:{
-            size_t ct=L(g);if(!cg_expr_into(g,s->cond,prog,ct))return false;
+            SBuf cond;sb_init(&cond);
+            if(!cg_expr_val(g,s->cond,&cond)){sb_free(&cond);return false;}
             size_t le=L(g);
-            E(g,"    if(aut_truthy(_tmp%zu)) {\n",ct);
-            E(g,"    aut_free(_tmp%zu);\n",ct);
-            if(!cg_stmts(g,s->then,s->nthen,prog,inlp))return false;
-            if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,prog,inlp))return false;}
-            E(g,"    } /* end if %zu */\n",le);(void)le;
+            E(g,"    if(%s) {\n",cond.d);
+            sb_free(&cond);
+            if(!cg_stmts(g,s->then,s->nthen,inlp))return false;
+            if(s->nels>0){
+                E(g,"    } else {\n");
+                if(!cg_stmts(g,s->els,s->nels,inlp))return false;
+            }
+            E(g,"    }\n");
+            (void)le;
             break;
         }
         case SK_WHILE:{
             size_t lw=L(g);
-            E(g,"    while(1) { /* while_%zu */\n",lw);
-            size_t ct=L(g);if(!cg_expr_into(g,s->cond,prog,ct))return false;
-            E(g,"        if(!aut_truthy(_tmp%zu)) { aut_free(_tmp%zu); break; }\n",ct,ct);
-            E(g,"        aut_free(_tmp%zu);\n",ct);
-            if(!cg_stmts(g,s->loop,s->nloop,prog,true))return false;
-            E(g,"    } /* end while_%zu */\n",lw);
+            E(g,"    while(1) {\n");
+            SBuf cond;sb_init(&cond);
+            if(!cg_expr_val(g,s->cond,&cond)){sb_free(&cond);return false;}
+            E(g,"        if(!(%s)) break;\n",cond.d);
+            sb_free(&cond);
+            if(!cg_stmts(g,s->loop,s->nloop,true))return false;
+            E(g,"    }\n");
+            (void)lw;
             break;
         }
         case SK_FOR:{
             size_t lf=L(g);
-            size_t st=L(g),en=L(g),sp=L(g);
-            if(!cg_expr_into(g,s->range_start,prog,st))return false;
-            if(!cg_expr_into(g,s->range_end,prog,en))return false;
-            if(!cg_expr_into(g,s->range_step,prog,sp))return false;
-            E(g,"    { /* for_%zu */\n",lf);
-            E(g,"        long long _for_start_%zu = aut_expect_int(\"range\", _tmp%zu);\n",lf,st);
-            E(g,"        long long _for_end_%zu = aut_expect_int(\"range\", _tmp%zu);\n",lf,en);
-            E(g,"        long long _for_step_%zu = aut_expect_int(\"range\", _tmp%zu);\n",lf,sp);
-            E(g,"        aut_free(_tmp%zu); aut_free(_tmp%zu); aut_free(_tmp%zu);\n",st,en,sp);
+            SBuf start,end,step;sb_init(&start);sb_init(&end);sb_init(&step);
+            if(!cg_expr_val(g,s->range_start,&start)){sb_free(&start);sb_free(&end);sb_free(&step);return false;}
+            if(!cg_expr_val(g,s->range_end,&end)){sb_free(&start);sb_free(&end);sb_free(&step);return false;}
+            if(!cg_expr_val(g,s->range_step,&step)){sb_free(&start);sb_free(&end);sb_free(&step);return false;}
+            E(g,"    {\n");
+            E(g,"        long long _for_start_%zu = %s;\n",lf,start.d);
+            E(g,"        long long _for_end_%zu = %s;\n",lf,end.d);
+            E(g,"        long long _for_step_%zu = %s;\n",lf,step.d);
+            sb_free(&start);sb_free(&end);sb_free(&step);
             E(g,"        if(_for_step_%zu == 0) { fprintf(stderr, \"Error: range step cannot be 0\\n\"); exit(1); }\n",lf);
-            E(g,"        for(long long _for_i_%zu = _for_start_%zu; ",lf,lf);
-            E(g,"(_for_step_%zu > 0) ? (_for_i_%zu < _for_end_%zu) : (_for_i_%zu > _for_end_%zu); ",lf,lf,lf,lf,lf);
-            E(g,"_for_i_%zu += _for_step_%zu) {\n",lf,lf);
-            E(g,"            aut_free(%s); %s = aut_int(_for_i_%zu);\n",s->loop_var,s->loop_var,lf);
-            if(!cg_stmts(g,s->loop,s->nloop,prog,true))return false;
+            E(g,"        for(long long %s = _for_start_%zu; ",s->loop_var,lf);
+            E(g,"(_for_step_%zu > 0) ? (%s < _for_end_%zu) : (%s > _for_end_%zu); ",lf,s->loop_var,lf,s->loop_var,lf);
+            E(g,"%s += _for_step_%zu) {\n",s->loop_var,lf);
+            if(!cg_stmts(g,s->loop,s->nloop,true))return false;
             E(g,"        }\n");
-            E(g,"    } /* end for_%zu */\n",lf);
+            E(g,"    }\n");
             break;
         }
         case SK_RETURN:{
-            if(s->expr){size_t t=L(g);if(!cg_expr_into(g,s->expr,prog,t))return false;E(g,"    _ret = _tmp%zu; goto _return;\n",t);}
-            else E(g,"    _ret = aut_int(0); goto _return;\n");
+            if(s->expr){
+                SBuf expr;sb_init(&expr);
+                if(!cg_expr_val(g,s->expr,&expr)){sb_free(&expr);return false;}
+                E(g,"    return %s;\n",expr.d);
+                sb_free(&expr);
+            }else{
+                E(g,"    return 0;\n");
+            }
             break;
         }
         case SK_BREAK:
-            if(!inlp){ERR("break outside loop");return false;}
-            E(g,"    break;\n");break;
+            E(g,"    break;\n");
+            break;
         case SK_CONTINUE:
-            if(!inlp){ERR("continue outside loop");return false;}
-            E(g,"    continue;\n");break;
+            E(g,"    continue;\n");
+            break;
         case SK_CALL:{
-            size_t t=L(g);if(!cg_expr_into(g,s->expr,prog,t))return false;
-            E(g,"    aut_free(_tmp%zu);\n",t);break;
+            SBuf expr;sb_init(&expr);
+            if(!cg_expr_val(g,s->expr,&expr)){sb_free(&expr);return false;}
+            E(g,"    (void)%s;\n",expr.d);
+            sb_free(&expr);
+            break;
         }
+        default:
+            break;
         }
     }
     return true;
 }
 
-static bool cg_fn(CG*g,FnDef*fn,const Program*prog){
-    E(g,"static aut_val _fn_%s(",fn->name);
-    for(size_t i=0;i<fn->nparams;i++){if(i)E(g,", ");E(g,"aut_val _%s_arg",fn->params[i]);}
-    E(g,") {\n");
-    for(size_t i=0;i<fn->nparams;i++)E(g,"    aut_val %s = aut_copy(_%s_arg);\n",fn->params[i],fn->params[i]);
-
-    SList vars;sl_init(&vars);
-    struct{Stmt**s;size_t n;}stack[64];int sp=0;
-    stack[sp].s=fn->body;stack[sp].n=fn->nbody;sp++;
-    while(sp>0){sp--;Stmt**s=stack[sp].s;size_t n=stack[sp].n;
-        for(size_t i=0;i<n;i++){
-            if(s[i]->kind==SK_ASSIGN){
-                bool found=false;for(size_t j=0;j<vars.len;j++)if(strcmp(vars.items[j],s[i]->var)==0){found=true;break;}
-                if(!found)for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s[i]->var)==0){found=true;break;}
-                if(!found){sl_push(&vars,xdup(s[i]->var));}
+typedef struct {char*name;TypeKind type;}VarInfo;
+static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size_t*cap,FnDef*fn){
+    for(size_t i=0;i<nbody;i++){
+        Stmt*s=body[i];
+        if(s->kind==SK_ASSIGN){
+            bool found=false;
+            for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}
+            if(!found){
+                for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}
             }
-            if(s[i]->kind==SK_IF&&sp<63){stack[sp].s=s[i]->then;stack[sp].n=s[i]->nthen;sp++;if(sp<64&&s[i]->nels>0){stack[sp].s=s[i]->els;stack[sp].n=s[i]->nels;sp++;}}
-            if(s[i]->kind==SK_WHILE&&sp<64){stack[sp].s=s[i]->loop;stack[sp].n=s[i]->nloop;sp++;}
-            if(s[i]->kind==SK_FOR&&sp<64){stack[sp].s=s[i]->loop;stack[sp].n=s[i]->nloop;sp++;}
-            if(s[i]->kind==SK_FOR){
-                bool found=false;for(size_t j=0;j<vars.len;j++)if(strcmp(vars.items[j],s[i]->loop_var)==0){found=true;break;}
-                if(!found)for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s[i]->loop_var)==0){found=true;break;}
-                if(!found){sl_push(&vars,xdup(s[i]->loop_var));}
+            if(!found){
+                if(*count==*cap){
+                    size_t nc=*cap?*cap*2:8;
+                    VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));
+                    if(!np)return false;
+                    *vars=np;*cap=nc;
+                }
+                (*vars)[*count].name=xdup(s->var);
+                (*vars)[*count].type=s->var_type?s->var_type:TYPE_INT;
+                (*count)++;
             }
         }
+        if(s->kind==SK_IF){
+            if(!collect_vars(s->then,s->nthen,vars,count,cap,fn))return false;
+            if(!collect_vars(s->els,s->nels,vars,count,cap,fn))return false;
+        }
+        if(s->kind==SK_WHILE){
+            if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;
+        }
+        if(s->kind==SK_FOR){
+            bool found=false;
+            for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->loop_var)==0){found=true;break;}
+            for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->loop_var)==0){found=true;break;}
+            if(!found){
+                if(*count==*cap){
+                    size_t nc=*cap?*cap*2:8;
+                    VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));
+                    if(!np)return false;
+                    *vars=np;*cap=nc;
+                }
+                (*vars)[*count].name=xdup(s->loop_var);
+                (*vars)[*count].type=TYPE_INT;
+                (*count)++;
+            }
+            if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;
+        }
     }
-    for(size_t i=0;i<vars.len;i++)E(g,"    aut_val %s = aut_int(0);\n",vars.items[i]);
-    E(g,"    aut_val _ret = aut_int(0);\n");
-    if(!cg_stmts(g,fn->body,fn->nbody,prog,false)){sl_free(&vars);return false;}
-    E(g,"    _ret = aut_int(0);\n");
-    E(g,"  _return:\n");
-    for(size_t i=0;i<fn->nparams;i++)E(g,"    aut_free(%s);\n",fn->params[i]);
-    for(size_t i=0;i<vars.len;i++)E(g,"    aut_free(%s);\n",vars.items[i]);
-    sl_free(&vars);
-    E(g,"    return _ret;\n}\n\n");
+    return true;
+}
+
+static bool cg_fn(CG*g,FnDef*fn,Program*prog){
+    (void)prog;
+    E(g,"static %s _fn_%s(",cg_type(fn->return_type),fn->name);
+    for(size_t i=0;i<fn->nparams;i++){
+        if(i)E(g,", ");
+        E(g,"%s %s",cg_type(fn->param_types[i]),fn->params[i]);
+    }
+    E(g,") {\n");
+    
+    VarInfo*vars=NULL;size_t vcount=0,vcap=0;
+    if(!collect_vars(fn->body,fn->nbody,&vars,&vcount,&vcap,fn)){
+        free(vars);
+        return false;
+    }
+    for(size_t i=0;i<vcount;i++){
+        E(g,"    %s %s = 0;\n",cg_type(vars[i].type),vars[i].name);
+        free(vars[i].name);
+    }
+    free(vars);
+    
+    if(!cg_stmts(g,fn->body,fn->nbody,false))return false;
+    
+    E(g,"    return 0;\n");
+    E(g,"}\n\n");
     return true;
 }
 
 static const char*RUNTIME =
 "#include <stdio.h>\n"
 "#include <stdlib.h>\n"
-"#include <string.h>\n"
-"#include <ctype.h>\n\n"
-"/* ---- AutismLang runtime v0.1.0 ---- */\n"
-"typedef struct { int type; long long ival; char *sval; } aut_val;\n"
-"/* type: 0=int, 1=heap-str, 2=static-str */\n\n"
-"static aut_val aut_int(long long v) { aut_val r; r.type=0; r.ival=v; r.sval=NULL; return r; }\n"
-"static aut_val aut_str_static(const char *s) { aut_val r; r.type=2; r.ival=0; r.sval=(char*)s; return r; }\n"
-"static aut_val aut_str_heap(char *s) { aut_val r; r.type=1; r.ival=0; r.sval=s; return r; }\n"
-"static void aut_free(aut_val v) { if(v.type==1) free(v.sval); }\n"
-"static aut_val aut_copy(aut_val v) {\n"
-"    if(v.type==0) return v;\n"
-"    char *s = strdup(v.sval ? v.sval : \"\");\n"
-"    return aut_str_heap(s);\n"
-"}\n"
-"static const char* aut_type_name(aut_val v) { return v.type==0 ? \"int\" : \"str\"; }\n"
-"static long long aut_expect_int(const char *op, aut_val v) {\n"
-"    if(v.type!=0) {\n"
-"        fprintf(stderr, \"TypeError: operator %s expects int, got %s\\n\", op, aut_type_name(v));\n"
-"        exit(1);\n"
-"    }\n"
-"    return v.ival;\n"
-"}\n"
-"static int aut_truthy(aut_val v) {\n"
-"    if(v.type==0) return v.ival!=0;\n"
-"    return v.sval && v.sval[0]!=0;\n"
-"}\n"
-"static int aut_eq(aut_val a, aut_val b) {\n"
-"    if(a.type==0 && b.type==0) return a.ival==b.ival;\n"
-"    if(a.type!=0 && b.type!=0) return strcmp(a.sval?a.sval:\"\", b.sval?b.sval:\"\")==0;\n"
-"    return 0;\n"
-"}\n"
-"static aut_val aut_add(aut_val a, aut_val b) {\n"
-"    if(a.type==0 && b.type==0) return aut_int(a.ival+b.ival);\n"
-"    if(a.type!=0 && b.type!=0) {\n"
-"        const char *sa = (a.type!=0 && a.sval) ? a.sval : \"\";\n"
-"        const char *sb = (b.type!=0 && b.sval) ? b.sval : \"\";\n"
-"        size_t la=strlen(sa), lb=strlen(sb);\n"
-"        char *r=malloc(la+lb+1); memcpy(r,sa,la); memcpy(r+la,sb,lb); r[la+lb]=0;\n"
-"        return aut_str_heap(r);\n"
-"    }\n"
-"    fprintf(stderr, \"TypeError: cannot add int and str\\n\");\n"
-"    exit(1);\n"
-"}\n"
-"static void aut_print(aut_val v) {\n"
-"    if(v.type==0) printf(\"%lld\\n\", v.ival);\n"
-"    else printf(\"%s\\n\", v.sval ? v.sval : \"\");\n"
-"    fflush(stdout);\n"
-"}\n"
-"static aut_val aut_input(void) {\n"
-"    fflush(stdout);\n"
-"    char buf[4096]; buf[0]=0;\n"
-"    if(fgets(buf, sizeof(buf), stdin)) {\n"
-"        size_t n=strlen(buf);\n"
-"        while(n>0&&(buf[n-1]=='\\n'||buf[n-1]=='\\r'))buf[--n]=0;\n"
-"    }\n"
-"    return aut_str_heap(strdup(buf));\n"
-"}\n"
-"/* v0.1.0: type conversion functions */\n"
-"static aut_val aut_to_int(aut_val v) {\n"
-"    if(v.type==0) return v;\n"
-"    long long result = 0;\n"
-"    const char *s = v.sval ? v.sval : \"\";\n"
-"    while(*s && isspace((unsigned char)*s)) s++;\n"
-"    int neg = 0;\n"
-"    if(*s == '-') { neg = 1; s++; }\n"
-"    else if(*s == '+') s++;\n"
-"    while(*s >= '0' && *s <= '9') {\n"
-"        result = result * 10 + (*s - '0');\n"
-"        s++;\n"
-"    }\n"
-"    return aut_int(neg ? -result : result);\n"
-"}\n"
-"static aut_val aut_to_str(aut_val v) {\n"
-"    if(v.type!=0) return aut_copy(v);\n"
-"    char buf[32];\n"
-"    snprintf(buf, sizeof(buf), \"%lld\", v.ival);\n"
-"    return aut_str_heap(strdup(buf));\n"
-"}\n\n";
+"#include <string.h>\n\n"
+"/* AutismLang v0.2.0 - Static typed runtime (minimal) */\n\n";
 
 static bool codegen(const Program*prog,const char*out_path){
     CG g;cg_init(&g);
     sb_fmt(&g.out,"/* AutismLang v%s | backend=%s */\n",AUTISMLANG_VERSION,AUTISMLANG_BACKEND);
     sb_cat(&g.out,RUNTIME);
-    /* forward declarations */
     for(size_t i=0;i<prog->nfns;i++){
-        E(&g,"static aut_val _fn_%s(",prog->fns[i].name);
-        for(size_t j=0;j<prog->fns[i].nparams;j++){if(j)E(&g,", ");E(&g,"aut_val");}
+        E(&g,"static %s _fn_%s(",cg_type(prog->fns[i].return_type),prog->fns[i].name);
+        for(size_t j=0;j<prog->fns[i].nparams;j++){
+            if(j)E(&g,", ");
+            E(&g,"%s",cg_type(prog->fns[i].param_types[j]));
+        }
         E(&g,");\n");
     }
     sb_cat(&g.out,"\n");
-    /* generate functions */
     for(size_t i=0;i<prog->nfns;i++){
         if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog)){
             fprintf(stderr,"Codegen error in '%s': %s\n",prog->fns[i].name,g_err);
             cg_free(&g);return false;
         }
     }
-    /* main */
     sb_cat(&g.out,"int main(void) { _fn_main(); return 0; }\n");
-
-    /* write */
+    
     char*pc=xdup(out_path);for(size_t i=0;pc[i];i++){if(pc[i]=='/'||pc[i]=='\\'){char sv=pc[i];pc[i]=0;if(pc[0])MKDIR(pc);pc[i]=sv;}}free(pc);
     FILE*fp=fopen(out_path,"wb");if(!fp){fprintf(stderr,"Cannot open '%s'\n",out_path);cg_free(&g);return false;}
     fwrite(g.out.d,1,g.out.len,fp);fclose(fp);
@@ -664,7 +914,7 @@ int main(int argc,char**argv){
     for(int i=1;i<argc;i++){
         if(strcmp(argv[i],"--help")==0){
             printf("Usage: %s <input.aut> [-o output.c] [--help] [--version] [--metadata]\n",argv[0]);
-            printf("Backend: %s\n",AUTISMLANG_BACKEND);
+            printf("Backend: %s (static-typed)\n",AUTISMLANG_BACKEND);
             return 0;
         }else if(strcmp(argv[i],"--version")==0){
             printf("AutismLang Compiler %s (backend=%s)\n",AUTISMLANG_VERSION,AUTISMLANG_BACKEND);
@@ -691,6 +941,7 @@ int main(int argc,char**argv){
     Program prog;if(!parse_program(&lines,&prog)){sl_free(&lines);return 1;}
     bool has_main=false;for(size_t i=0;i<prog.nfns;i++)if(strcmp(prog.fns[i].name,"main")==0){has_main=true;break;}
     if(!has_main){fprintf(stderr,"Error: missing 'fn main():'\n");free_program(&prog);sl_free(&lines);return 1;}
+    if(!type_check_program(&prog)){free_program(&prog);sl_free(&lines);return 1;}
     if(!codegen(&prog,out)){free_program(&prog);sl_free(&lines);return 1;}
     printf("Compiled %s -> %s\n",in,out);
     free_program(&prog);sl_free(&lines);return 0;

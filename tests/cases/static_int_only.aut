@@ -1,0 +1,23 @@
+# Test static typing with int only
+fn add(a, b):
+    return a + b
+
+fn main():
+    x = 10
+    y = 20
+    result = add(x, y)
+    print(result)
+    
+    # Test arithmetic
+    a = 5 + 3 * 2
+    print(a)
+    
+    # Test comparison
+    if x < y:
+        print(1)
+    else:
+        print(0)
+    
+    # Test for loop
+    for i in range(3):
+        print(i)

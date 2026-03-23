@@ -1,16 +1,12 @@
 {
-  "name": "AutismLang",
-  "version": "0.1.0",
-  "backend": "c",
-  "stage": "bootstrap",
-  "updated_at": "2026-03-23",
-  "release_notes": [
-    "Added for-in-range loop: for i in range(...):",
-    "Added type conversion functions: int() and str()",
-    "range() supports 1-3 arguments (stop, start/stop, start/stop/step)",
-    "Negative step support in range() for counting backwards",
-    "int() converts strings to integers",
-    "str() converts integers to strings",
-    "Improved loop variable handling in for loops"
-  ]
+    "version": "0.2.0",
+    "backend": "c-static",
+    "changes": [
+        "Removed dynamic typing (aut_val)",
+        "Added static types: int (64-bit), ptr, bool",
+        "Compile-time type checking",
+        "Raw C code generation without runtime wrappers",
+        "Removed string support (string literals cause errors)",
+        "Removed implicit int-to-string conversions"
+    ]
 }
