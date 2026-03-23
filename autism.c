@@ -4,7 +4,7 @@
  * 
  * Changes from v0.1.0:
  * - Removed dynamic typing (aut_val)
- * - Added static types: int (64-bit), ptr, bool
+ * - Added static types: int (64-bit), ptr, bool, string
  * - Compile-time type checking
  * - Raw C code generation without runtime wrappers
  */
@@ -89,6 +89,7 @@ typedef enum {
     TYPE_INT,       /* 64-bit integer */
     TYPE_PTR,       /* raw pointer */
     TYPE_BOOL,      /* boolean */
+    TYPE_STRING,    /* string literal */
     TYPE_VOID       /* void (for functions) */
 } TypeKind;
 
@@ -97,6 +98,7 @@ static const char* type_name(TypeKind t) {
         case TYPE_INT: return "int";
         case TYPE_PTR: return "ptr";
         case TYPE_BOOL: return "bool";
+        case TYPE_STRING: return "string";
         case TYPE_VOID: return "void";
         default: return "unknown";
     }
@@ -105,7 +107,7 @@ static const char* type_name(TypeKind t) {
 /* ======================================================
  * AST WITH TYPE INFORMATION
  * ====================================================== */
-typedef enum{EK_INT,EK_BOOL,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST}EK;
+typedef enum{EK_INT,EK_BOOL,EK_STRING,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST}EK;
 typedef struct Expr{EK kind;TypeKind type;long long ival;char*sval;char*name;char*fn;char op[3];struct Expr*left,*right,**args;size_t argc;}Expr;
 typedef enum{SK_PRINT,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL,SK_VAR_DECL}SK;
 typedef struct Stmt{SK kind;char*var;TypeKind var_type;Expr*expr,*cond;struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
@@ -185,6 +187,31 @@ static bool scope_add(Scope* sc, const char* name, TypeKind type, int is_param) 
 static Expr*parse_expr(const char**pp);
 static void skip(const char**pp){while(**pp&&isspace((unsigned char)**pp))(*pp)++;}
 
+/* Escape sequence processing for string literals */
+static char* process_string_escape(const char* src, size_t len) {
+    char* result = malloc(len + 1);
+    if (!result) return NULL;
+    
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (src[i] == '\\' && i + 1 < len) {
+            switch (src[i + 1]) {
+                case 'n': result[j++] = '\n'; i++; break;
+                case 't': result[j++] = '\t'; i++; break;
+                case 'r': result[j++] = '\r'; i++; break;
+                case '\\': result[j++] = '\\'; i++; break;
+                case '"': result[j++] = '"'; i++; break;
+                case '0': result[j++] = '\0'; i++; break;
+                default: result[j++] = src[i]; break;
+            }
+        } else {
+            result[j++] = src[i];
+        }
+    }
+    result[j] = '\0';
+    return result;
+}
+
 static bool parse_args(const char**pp,Expr***oa,size_t*on){
     skip(pp);if(**pp!='('){ERR("expected '('");return false;}(*pp)++;
     Expr**args=NULL;size_t n=0,cap=0;skip(pp);
@@ -199,7 +226,29 @@ static bool parse_args(const char**pp,Expr***oa,size_t*on){
 static Expr*parse_factor(const char**pp){
     skip(pp);const char*p=*pp;
     if(*p=='('){(*pp)++;Expr*e=parse_expr(pp);if(!e)return NULL;skip(pp);if(**pp!=')'){free_expr(e);ERR("missing ')'");return NULL;}(*pp)++;return e;}
-    if(*p=='"'){ERR("string literals not supported in static-typed mode");return NULL;}
+    if(*p=='"'){
+        /* Parse string literal */
+        (*pp)++; /* skip opening quote */
+        const char* start = *pp;
+        size_t len = 0;
+        while(**pp && **pp != '"'){
+            if(**pp == '\\' && (*pp)[1]) (*pp)++; /* skip escape char */
+            (*pp)++;
+            len++;
+        }
+        if(**pp != '"'){ERR("unterminated string literal");return NULL;}
+        char* raw_str = xndup(start, (size_t)(*pp - start));
+        (*pp)++; /* skip closing quote */
+        char* processed = process_string_escape(raw_str, strlen(raw_str));
+        free(raw_str);
+        if(!processed){ERR("failed to process string");return NULL;}
+        Expr*e=calloc(1,sizeof(Expr));
+        if(!e){free(processed);return NULL;}
+        e->kind=EK_STRING;
+        e->type=TYPE_STRING;
+        e->sval=processed;
+        return e;
+    }
     bool neg=false;if(*p=='-'&&isdigit((unsigned char)p[1])){neg=true;(*pp)++;p++;}
     if(isdigit((unsigned char)*p)){char*end;long long v=strtoll(*pp,&end,10);*pp=end;Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->type=TYPE_INT;e->ival=neg?-v:v;return e;}(void)neg;
     if(is_ic(*p)){
@@ -423,6 +472,9 @@ static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog){
     case EK_BOOL:
         e->type=TYPE_BOOL;
         return TYPE_BOOL;
+    case EK_STRING:
+        e->type=TYPE_STRING;
+        return TYPE_STRING;
     case EK_PTR_NULL:
         e->type=TYPE_PTR;
         return TYPE_PTR;
@@ -500,8 +552,8 @@ static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop){
     case SK_PRINT:{
         TypeKind t=type_check_expr(s->expr,sc,prog);
         if(t==TYPE_UNKNOWN)return false;
-        if(t!=TYPE_INT&&t!=TYPE_BOOL){
-            ERR("print only supports int and bool, got %s",type_name(t));
+        if(t!=TYPE_INT&&t!=TYPE_BOOL&&t!=TYPE_STRING){
+            ERR("print only supports int, bool, and string, got %s",type_name(t));
             return false;
         }
         return true;
@@ -607,7 +659,7 @@ static bool type_check_fn(FnDef*fn,Program*prog){
 static bool type_check_program(Program*prog){
     for(size_t i=0;i<prog->nfns;i++){
         if(!type_check_fn(&prog->fns[i],prog)){
-            fprintf(stderr,"Type error in '%s': %s\n",prog->fns[i].name,g_err);
+            fprintf(stderr,"TypeError in '%s': %s\n",prog->fns[i].name,g_err);
             return false;
         }
     }
@@ -628,9 +680,40 @@ static const char* cg_type(TypeKind t){
         case TYPE_INT: return "long long";
         case TYPE_PTR: return "void*";
         case TYPE_BOOL: return "int";
+        case TYPE_STRING: return "const char*";
         case TYPE_VOID: return "void";
         default: return "long long";
     }
+}
+
+/* Helper to escape string for C output */
+static char* escape_for_c(const char* s) {
+    size_t len = strlen(s);
+    char* result = malloc(len * 4 + 1); /* worst case: each char becomes \xNN */
+    if (!result) return NULL;
+    
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '\n': result[j++] = '\\'; result[j++] = 'n'; break;
+            case '\t': result[j++] = '\\'; result[j++] = 't'; break;
+            case '\r': result[j++] = '\\'; result[j++] = 'r'; break;
+            case '\\': result[j++] = '\\'; result[j++] = '\\'; break;
+            case '"': result[j++] = '\\'; result[j++] = '"'; break;
+            case '\0': result[j++] = '\\'; result[j++] = '0'; break;
+            default:
+                if (c >= 32 && c < 127) {
+                    result[j++] = c;
+                } else {
+                    /* Output as hex escape */
+                    j += sprintf(result + j, "\\x%02x", c);
+                }
+                break;
+        }
+    }
+    result[j] = '\0';
+    return result;
 }
 
 static bool cg_expr(CG*g,Expr*e);
@@ -644,6 +727,13 @@ static bool cg_expr_val(CG*g,Expr*e,SBuf*result){
     case EK_BOOL:
         sb_cat(result,e->ival?"1":"0");
         return true;
+    case EK_STRING:{
+        char* escaped = escape_for_c(e->sval);
+        if (!escaped) { ERR("failed to escape string"); return false; }
+        sb_fmt(result,"\"%s\"", escaped);
+        free(escaped);
+        return true;
+    }
     case EK_PTR_NULL:
         sb_cat(result,"NULL");
         return true;
@@ -712,6 +802,8 @@ static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp){
             if(!cg_expr_val(g,s->expr,&expr)){sb_free(&expr);return false;}
             if(s->expr->type==TYPE_BOOL){
                 E(g,"    printf(\"%%s\\n\", %s ? \"true\" : \"false\");\n",expr.d);
+            }else if(s->expr->type==TYPE_STRING){
+                E(g,"    printf(\"%%s\\n\", %s);\n",expr.d);
             }else{
                 E(g,"    printf(\"%%lld\\n\", (long long)(%s));\n",expr.d);
             }

@@ -50,9 +50,9 @@ test-success-%: build/tests/% tests/expected/%.out
 	@diff -u tests/expected/$*.out build/tests/$*.actual
 	@echo PASS: $*
 
-test-fail-%: build/tests/%
-	@set +e; ./build/tests/$* > build/tests/$*.actual 2>&1; code=$$?; set -e; \
-	if [ $$code -eq 0 ]; then echo "Test '$*' failed: expected non-zero exit code"; cat build/tests/$*.actual; exit 1; fi; \
+test-fail-%: tests/cases/%.aut | build/tests
+	@set +e; ./autism $< -o build/tests/$*.c > build/tests/$*.actual 2>&1; code=$$?; set -e; \
+	if [ $$code -eq 0 ]; then echo "Test '$*' failed: expected non-zero exit code from compiler"; cat build/tests/$*.actual; exit 1; fi; \
 	if ! grep -F "TypeError" build/tests/$*.actual > /dev/null; then echo "Test '$*' failed: expected output containing TypeError"; cat build/tests/$*.actual; exit 1; fi
 	@echo PASS: $*
 
