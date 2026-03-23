@@ -1,0 +1,25 @@
+# Type conversion examples
+
+fn main():
+    # int() converts string to integer
+    s = "42"
+    n = int(s)
+    print(n + 10)
+    
+    # str() converts integer to string
+    x = 100
+    msg = "The value is " + str(x)
+    print(msg)
+    
+    # Using int() with input
+    print("Enter a number:")
+    user_input = input()
+    num = int(user_input)
+    print("Double is:")
+    print(num * 2)
+    
+    # Combining conversions
+    a = "123"
+    b = int(a) + 77
+    c = str(b)
+    print("Result: " + c)

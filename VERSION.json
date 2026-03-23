@@ -1,14 +1,16 @@
 {
   "name": "AutismLang",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "backend": "c",
   "stage": "bootstrap",
-  "updated_at": "2026-03-22",
+  "updated_at": "2026-03-23",
   "release_notes": [
-    "Added else if syntax",
-    "Added boolean literals True/False and true/false",
-    "Hardened runtime type checks for arithmetic/comparisons",
-    "Added CLI flags: --help, --version, --metadata",
-    "Added basic automated tests"
+    "Added for-in-range loop: for i in range(...):",
+    "Added type conversion functions: int() and str()",
+    "range() supports 1-3 arguments (stop, start/stop, start/stop/step)",
+    "Negative step support in range() for counting backwards",
+    "int() converts strings to integers",
+    "str() converts integers to strings",
+    "Improved loop variable handling in for loops"
   ]
 }

@@ -1,0 +1,14 @@
+fn main():
+    s = "42"
+    n = int(s)
+    print(n)
+    
+    x = 100
+    msg = str(x)
+    print(msg)
+    
+    # int to string and back
+    original = 55
+    as_str = str(original)
+    back_to_int = int(as_str)
+    print(back_to_int + 5)
