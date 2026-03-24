@@ -1,0 +1,15 @@
+fn main():
+    # Memory allocation
+    ptr x = alloc(8)
+    *x = 42
+    print(*x)
+    
+    # Address-of operator
+    int y = 100
+    ptr p = &y
+    print(*p)
+    
+    # Free memory
+    free(x)
+    
+    print(0)

@@ -1,12 +1,11 @@
 {
-    "version": "0.2.1",
+    "version": "0.3.0",
     "backend": "c-static",
     "changes": [
-        "Removed dynamic typing (aut_val)",
-        "Added static types: int (64-bit), ptr, bool",
-        "Compile-time type checking",
-        "Raw C code generation without runtime wrappers",
-        "Removed string support (string literals cause errors)",
-        "Removed implicit int-to-string conversions"
+        "Pointer operations: alloc(), free(), * (dereference), & (address-of)",
+        "Pointer type annotation: ptr x = alloc(8)",
+        "Pointer casting: ptr(int), int(ptr)",
+        "Hexadecimal integer literals: 0xB8000",
+        "Null pointer: null, NULL"
     ]
 }

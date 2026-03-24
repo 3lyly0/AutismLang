@@ -1,7 +1,7 @@
-# AutismLang (Bootstrap v0.1.0)
+# AutismLang (v0.3.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
-This repository currently contains a bootstrap compiler written in C with Python-like syntax for function layout.
+This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
 Current backend emits C code, then compiles it with GCC.
 
 ## Current Syntax
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.1.0)
+## Implemented Features (v0.3.0)
 
 - Function declaration with `fn name():`
 - Required entry point: `fn main():`
@@ -34,21 +34,79 @@ fn main():
 - `else:` blocks after `if`
 - `else if condition:` chained branching
 - `while condition:` loops
-- **NEW: `for var in range(...):` loops**
+- `for var in range(...):` loops
 - Function parameters and calls, for example: `fn greet(name): ...` then `greet("Neo")`
 - `return expression` from functions (default return is `0` when omitted)
 - Function calls inside expressions, for example: `x = add(2, 3) * 4`
 - `break` and `continue` inside `while` and `for` loops
 - Boolean literals: `True`, `False` (also `true`, `false`)
 - Builtin `input()` / `input("prompt")` (always returns string)
-- **NEW: `int(expression)` - converts string to integer**
-- **NEW: `str(expression)` - converts integer to string**
+- `int(expression)` - converts string to integer
+- `str(expression)` - converts integer to string
 - Inline comments using `#` at the end of code lines
 - Condition operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Strict runtime type checks for arithmetic/comparisons
 - CLI flags: `--help`, `--version`, `--metadata`
 
-## NEW: For-In-Range Loop
+## NEW: Pointer & Memory Management (v0.3.0)
+
+AutismLang now supports low-level pointer operations for OS development:
+
+### Pointer Type Annotation
+
+```aut
+fn main():
+    ptr x = alloc(8)    # Allocate 8 bytes, returns pointer
+    *x = 42             # Dereference and assign
+    print(*x)           # Dereference and read (prints 42)
+    free(x)             # Free allocated memory
+```
+
+### Address-Of Operator
+
+```aut
+fn main():
+    int y = 100
+    ptr p = &y          # Get address of variable
+    print(*p)           # Dereference (prints 100)
+```
+
+### Pointer Casting
+
+```aut
+fn main():
+    # Cast integer to pointer (for memory-mapped I/O)
+    ptr vga = ptr(0xB8000)   # VGA text buffer address
+    
+    # Cast pointer to integer
+    int addr = int(p)
+    addr = addr + 8
+    ptr p2 = ptr(addr)
+```
+
+### Available Pointer Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `ptr x = alloc(size)` | Allocate memory, returns pointer |
+| `free(ptr)` | Free allocated memory |
+| `*expr` | Dereference pointer (read/write) |
+| `&var` | Get address of variable |
+| `ptr(int_val)` | Cast integer to pointer |
+| `int(ptr_val)` | Cast pointer to integer |
+| `null` / `NULL` | Null pointer constant |
+
+### Hexadecimal Literals
+
+Integer literals now support hexadecimal notation for memory addresses:
+
+```aut
+fn main():
+    ptr vga = ptr(0xB8000)    # VGA text mode buffer
+    ptr bios = ptr(0xFFFF0)   # BIOS entry point
+```
+
+## For-In-Range Loop
 
 ```aut
 fn main():
@@ -69,7 +127,7 @@ fn main():
         print(i)
 ```
 
-## NEW: Type Conversion
+## Type Conversion
 
 ```aut
 fn main():
@@ -87,34 +145,6 @@ fn main():
     user_input = input("Enter number: ")
     num = int(user_input)
     print(num * 2)
-```
-
-Example arithmetic behavior:
-
-```aut
-fn main():
-    a = 10 + 5 * 2      # 20
-    b = (10 + 5) * 2    # 30
-    print(a)
-    print(b)
-```
-
-Example functions + while + else:
-
-```aut
-fn greet(name, times):
-    i = 0
-    while i < times:
-        print("hello " + name)
-        i = i + 1
-
-fn main():
-    year = 2026
-    if year == 2027:
-        print("wrong")
-    else:
-        print("ok")
-    greet("AutismLang", 2)
 ```
 
 ## Quick Start
@@ -158,44 +188,3 @@ make test
 ```bash
 ./autism --metadata
 ```
-
-## About ASM Output
-
-The active backend in `autism.c` currently emits C, not NASM.
-If you need assembly today, generate C first then ask GCC to emit assembly:
-
-```bash
-./autism examples/hello.aut -o build/hello.c
-gcc -S -masm=intel build/hello.c -o build/hello.s
-```
-
-## Automation (GitHub Actions)
-
-- CI runs automatically on every push and pull request across:
-  - Linux (GCC)
-  - macOS (Clang)
-  - Windows (MSYS2 + GCC)
-- Release workflow runs on tags like `v0.1.0` and publishes:
-  - Linux archive
-  - macOS archive
-  - Windows archive
-- GitHub Release notes are generated automatically from merged PRs.
-
-### Release Flow
-
-1. Update `VERSION.json`
-2. Commit and push
-3. Create and push tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-4. GitHub Actions will build all release binaries and create the release automatically.
-
-## Next Milestones
-
-- Data structures (arrays/lists)
-- Logical operators (`and`, `or`, `not`)
-- Native ASM backend (future milestone)
