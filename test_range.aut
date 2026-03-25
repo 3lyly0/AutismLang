@@ -1,0 +1,6 @@
+fn main():
+    print("Test 1: 0..5 exclusive")
+    for i in 0..5:
+        print(i)
+    
+    print("Done")

@@ -1,4 +1,4 @@
-# AutismLang (v0.3.0)
+# AutismLang (v0.4.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.3.0)
+## Implemented Features (v0.4.0)
 
 - Function declaration with `fn name():`
 - Required entry point: `fn main():`
@@ -34,23 +34,68 @@ fn main():
 - `else:` blocks after `if`
 - `else if condition:` chained branching
 - `while condition:` loops
-- `for var in range(...):` loops
-- Function parameters and calls, for example: `fn greet(name): ...` then `greet("Neo")`
-- `return expression` from functions (default return is `0` when omitted)
-- Function calls inside expressions, for example: `x = add(2, 3) * 4`
-- `break` and `continue` inside `while` and `for` loops
-- Boolean literals: `True`, `False` (also `true`, `false`)
-- Builtin `input()` / `input("prompt")` (always returns string)
-- `int(expression)` - converts string to integer
-- `str(expression)` - converts integer to string
-- Inline comments using `#` at the end of code lines
-- Condition operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Strict runtime type checks for arithmetic/comparisons
-- CLI flags: `--help`, `--version`, `--metadata`
+- `for var in range:` loops with native range syntax
+- Function parameters and calls
+- Command-line options: `--help`, `--version`, `--metadata`
 
-## NEW: Pointer & Memory Management (v0.3.0)
+## NEW: Native Range Syntax (v0.4.0)
 
-AutismLang now supports low-level pointer operations for OS development:
+AutismLang now supports a clean, expressive range syntax for loops:
+
+### Exclusive Range (`..`)
+
+```aut
+fn main():
+    # Iterates 0, 1, 2, ..., 9 (10 is excluded)
+    for i in 0..10:
+        print(i)
+```
+
+### Inclusive Range (`..=`)
+
+```aut
+fn main():
+    # Iterates 0, 1, 2, 3, 4, 5 (5 is included)
+    for i in 0..=5:
+        print(i)
+```
+
+### Range with Step (`..` twice)
+
+```aut
+fn main():
+    # Iterates 0, 2, 4, 6, 8 (step of 2)
+    for i in 0..10..2:
+        print(i)
+```
+
+### Reverse Range
+
+```aut
+fn main():
+    # Iterates 10, 9, 8, 7, ..., 1, 0
+    for i in 10..0..-1:
+        print(i)
+```
+
+### Range Features
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `a..b` | Exclusive end, auto step | `0..10` → 0,1,...,9 |
+| `a..=b` | Inclusive end, auto step | `0..=5` → 0,1,...,5 |
+| `a..b..s` | Explicit step | `0..10..2` → 0,2,4,6,8 |
+| Auto step | Inferred +1 or -1 | `10..0` → step=-1 |
+
+### Step Inference Rules
+
+- If `start <= end`: step is `+1` (or explicit step)
+- If `start > end`: step is `-1` (or explicit step)
+- Explicit step always overrides inference
+
+## Pointer & Memory Management (v0.3.0)
+
+AutismLang supports low-level pointer operations for OS development:
 
 ### Pointer Type Annotation
 
@@ -98,61 +143,18 @@ fn main():
 
 ### Hexadecimal Literals
 
-Integer literals now support hexadecimal notation for memory addresses:
+Integer literals support hexadecimal notation for memory addresses:
 
 ```aut
-fn main():
-    ptr vga = ptr(0xB8000)    # VGA text mode buffer
-    ptr bios = ptr(0xFFFF0)   # BIOS entry point
-```
-
-## For-In-Range Loop
-
-```aut
-fn main():
-    # Range with stop only (0 to 4)
-    for i in range(5):
-        print(i)
-    
-    # Range with start and stop (2 to 6)
-    for i in range(2, 7):
-        print(i)
-    
-    # Range with step (0, 2, 4, 6, 8)
-    for i in range(0, 10, 2):
-        print(i)
-    
-    # Negative step (counting backwards)
-    for i in range(10, 0, -1):
-        print(i)
-```
-
-## Type Conversion
-
-```aut
-fn main():
-    # String to integer
-    s = "42"
-    n = int(s)
-    print(n + 10)  # prints 52
-    
-    # Integer to string
-    x = 100
-    msg = "Value: " + str(x)
-    print(msg)  # prints "Value: 100"
-    
-    # With user input
-    user_input = input("Enter number: ")
-    num = int(user_input)
-    print(num * 2)
+ptr vga = ptr(0xB8000)   # VGA text buffer
 ```
 
 ## Quick Start
 
-1. Build compiler (Linux/macOS with gcc or clang):
+1. Build compiler (Windows with gcc):
 
 ```bash
-gcc autism.c -O2 -Wall -Wextra -std=c11 -o autism
+gcc autism.c -o autism.exe
 ```
 
 2. Compile source:
@@ -164,8 +166,8 @@ gcc autism.c -O2 -Wall -Wextra -std=c11 -o autism
 3. Build executable from generated C:
 
 ```bash
-gcc -O2 build/hello.c -o build/hello
-./build/hello
+gcc -O2 build/hello.c -o build/hello.exe
+./build/hello.exe
 ```
 
 4. Run tests:
@@ -188,3 +190,31 @@ make test
 ```bash
 ./autism --metadata
 ```
+
+## Changelog
+
+### v0.4.0 (Current)
+- **Native range syntax**: `for i in 0..10:` (exclusive)
+- **Inclusive range**: `for i in 0..=10:` (inclusive end)
+- **Step specification**: `for i in 0..10..2:` (with custom step)
+- **Reverse ranges**: `for i in 10..0..-1:` (counting down)
+- **Auto step inference**: Step is inferred from start/end comparison
+- **Removed `range()` function**: Use native `..` syntax instead
+
+### v0.3.0
+- Pointer operations: `alloc()`, `free()`, `*` (dereference), `&` (address-of)
+- Pointer type annotation: `ptr x = alloc(8)`
+- Pointer casting: `ptr(int)`, `int(ptr)`
+- Hexadecimal integer literals: `0xB8000`
+- Null pointer: `null`, `NULL`
+
+### v0.2.0
+- Static typing with type inference
+- Type annotations: `int x = 5`, `bool flag = true`
+- String type support
+
+### v0.1.0
+- Basic function definitions
+- Variables and arithmetic
+- Control flow: if/else, while, for
+- Print statements

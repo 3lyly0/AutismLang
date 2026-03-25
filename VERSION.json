@@ -1,11 +1,11 @@
 {
-    "version": "0.3.0",
+    "version": "0.4.0",
     "backend": "c-static",
     "changes": [
-        "Pointer operations: alloc(), free(), * (dereference), & (address-of)",
-        "Pointer type annotation: ptr x = alloc(8)",
-        "Pointer casting: ptr(int), int(ptr)",
-        "Hexadecimal integer literals: 0xB8000",
-        "Null pointer: null, NULL"
+        "Native range syntax: for i in 0..10 (exclusive)",
+        "Native range syntax: for i in 0..=10 (inclusive)",
+        "Native range syntax: for i in 0..10..2 (with step)",
+        "Native range syntax: for i in 10..0..-1 (reverse)",
+        "Auto-inferred step direction based on start/end values"
     ]
 }

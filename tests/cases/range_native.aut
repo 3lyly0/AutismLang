@@ -1,0 +1,18 @@
+fn main():
+    print("Test 1: 0..5 exclusive")
+    for i in 0..5:
+        print(i)
+    
+    print("Test 2: 0..=3 inclusive")
+    for i in 0..=3:
+        print(i)
+    
+    print("Test 3: 0..6..2 step")
+    for i in 0..6..2:
+        print(i)
+    
+    print("Test 4: 5..0..-1 reverse")
+    for i in 5..0..-1:
+        print(i)
+    
+    print("Done")

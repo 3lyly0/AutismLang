@@ -1,0 +1,23 @@
+Test 1: 0..5 exclusive
+0
+1
+2
+3
+4
+Test 2: 0..=3 inclusive
+0
+1
+2
+3
+Test 3: 0..6..2 step
+0
+2
+4
+Test 4: 5..0..-1 reverse
+5
+4
+3
+2
+1
+0
+Done
