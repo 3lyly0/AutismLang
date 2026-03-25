@@ -206,15 +206,18 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         while(*fs&&is_icc(*fs)&&vn<sizeof(varname)-1)varname[vn++]=*fs++;varname[vn]=0;
         if(vn==0){ERR("for needs variable");goto done;}skip(&fs);
         if(strncmp(fs,"in",2)!=0||!isspace((unsigned char)fs[2])){ERR("for needs 'in'");goto done;}fs+=2;skip(&fs);
-        Expr*range_expr=parse_expr_s(fs);if(!range_expr){ERR("invalid range");goto done;}
+        size_t fsl=strlen(fs);if(!fsl||fs[fsl-1]!=':'){ERR("for needs ':'");goto done;}
+        char*fstr=xndup(fs,fsl-1);rtrim(fstr);
+        Expr*range_expr=parse_expr_s(fstr);free(fstr);if(!range_expr){ERR("invalid range");goto done;}
         if(range_expr->kind!=EK_RANGE){ERR("for needs range (e.g., 0..10)");free_expr(range_expr);goto done;}
         size_t bs=*idx+1,be=blk_end(lines,bs,lim,ind+4);if(bs==be){free_expr(range_expr);ERR("for needs body");goto done;}
         Stmt**lb;size_t lc;if(!parse_block(lines,bs,be,ind+4,&lb,&lc)){free_expr(range_expr);goto done;}*idx=be;
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(range_expr);for(size_t i=0;i<lc;i++)free_stmt(lb[i]);free(lb);goto done;}
         st->kind=SK_FOR;st->loop_var=xdup(varname);st->loop=lb;st->nloop=lc;st->range_expr=range_expr;res=st;goto done;
     }
-    if(strncmp(s,"if",2)==0&&isspace((unsigned char)s[2])){
-        const char*cs=ltrim(s+2);size_t cl=strlen(cs);if(!cl||cs[cl-1]!=':'){ERR("if needs ':'");goto done;}
+    if((strncmp(s,"if",2)==0&&isspace((unsigned char)s[2]))||(strncmp(s,"elif",4)==0&&isspace((unsigned char)s[4]))){
+        const char*kw=(s[1]=='f')?s+2:s+4;(void)kw; /* skip keyword; cs computed below */
+        const char*cs=ltrim((s[1]=='f')?s+2:s+4);size_t cl=strlen(cs);if(!cl||cs[cl-1]!=':'){ERR("if/elif needs ':'");goto done;}
         char*cstr=xndup(cs,cl-1);rtrim(cstr);Expr*cond=parse_expr_s(cstr);free(cstr);if(!cond)goto done;
         size_t bs=*idx+1,be=blk_end(lines,bs,lim,ind+4);if(bs==be){free_expr(cond);ERR("if needs body");goto done;}
         Stmt**tb;size_t tc;if(!parse_block(lines,bs,be,ind+4,&tb,&tc)){free_expr(cond);goto done;}*idx=be;
@@ -223,6 +226,13 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         if(*idx<lim){const char*er=lines->items[*idx];if(strlen(er)>=ind&&has_ind(er,ind)&&er[ind]!=' '){
             char*ec2=xdup(er+ind);rtrim(ec2);strip_comment(ec2);
             if(strcmp(ec2,"else:")==0){size_t es=*idx+1,ee=blk_end(lines,es,lim,ind+4);if(es<ee&&!parse_block(lines,es,ee,ind+4,&eb,&ec)){free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}*idx=ee;}
+            else if(strncmp(ec2,"elif ",5)==0||strncmp(ec2,"elif\t",5)==0){
+                /* treat 'elif COND:' as a nested if inside an else block */
+                Stmt*elif_st=parse_one(lines,idx,lim,ind);
+                if(!elif_st){free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                eb=malloc(sizeof(Stmt*));if(!eb){free_stmt(elif_st);free(ec2);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);free_expr(cond);goto done;}
+                eb[0]=elif_st;ec=1;
+            }
             free(ec2);
         }}
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(cond);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);for(size_t i=0;i<ec;i++)free_stmt(eb[i]);free(eb);goto done;}

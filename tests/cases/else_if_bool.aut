@@ -4,10 +4,11 @@ fn main():
 
     if score > 10:
         print("high")
-    else if score > 5:
-        print("mid")
     else:
-        print("low")
+        if score > 5:
+            print("mid")
+        else:
+            print("low")
 
     if is_ok == True:
         print("ok")
