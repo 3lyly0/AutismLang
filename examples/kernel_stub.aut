@@ -1,0 +1,6 @@
+fn main():
+    unsafe:
+        asm("cli")
+    while true:
+        unsafe:
+            asm("hlt")

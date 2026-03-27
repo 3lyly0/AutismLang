@@ -122,23 +122,23 @@ static bool parse_type_ref(const char**pp,Type*out){
     ERR("unknown type");return false;
 }
 
-typedef enum{EK_INT,EK_BOOL,EK_STRING,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST,EK_DEREF,EK_ADDROF,EK_ALLOC,EK_FREE,EK_PTR_CAST,EK_RANGE}EK;
+typedef enum{EK_INT,EK_BOOL,EK_STRING,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST,EK_DEREF,EK_ADDROF,EK_ALLOC,EK_FREE,EK_PTR_CAST,EK_IN,EK_RANGE}EK;
 typedef struct Expr{
     EK kind;Type type;Type cast_type;long long ival;char*sval;char*name;char*fn;char op[3];
     struct Expr*left,*right,**args;size_t argc;
     struct Expr*range_start,*range_end,*range_step;bool range_inclusive;
 }Expr;
-typedef enum{SK_PRINT,SK_DECL,SK_ASSIGN,SK_IF,SK_WHILE,SK_UNSAFE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
+typedef enum{SK_PRINT,SK_DECL,SK_ASSIGN,SK_IF,SK_WHILE,SK_UNSAFE,SK_ASM,SK_OUT,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
 typedef struct Stmt{
     SK kind;char*var;Type var_type;Expr*expr,*cond;
     struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
-    char*loop_var;Expr*range_expr;size_t line;
+    char*loop_var;Expr*range_expr;char*asm_text;int var_volatile;size_t line;
 }Stmt;
 typedef struct{char*name;char**params;Type*param_types;Type return_type;Stmt**body;size_t nbody;size_t nparams;}FnDef;
 typedef struct{FnDef*fns;size_t nfns,cap;}Program;
 
 static void free_expr(Expr*e){if(!e)return;free(e->sval);free(e->name);free(e->fn);free_expr(e->left);free_expr(e->right);for(size_t i=0;i<e->argc;i++)free_expr(e->args[i]);free(e->args);free_expr(e->range_start);free_expr(e->range_end);free_expr(e->range_step);free(e);}
-static void free_stmt(Stmt*s){if(!s)return;free(s->var);free_expr(s->expr);free_expr(s->cond);for(size_t i=0;i<s->nthen;i++)free_stmt(s->then[i]);free(s->then);for(size_t i=0;i<s->nels;i++)free_stmt(s->els[i]);free(s->els);for(size_t i=0;i<s->nloop;i++)free_stmt(s->loop[i]);free(s->loop);free(s->loop_var);free_expr(s->range_expr);free(s);}
+static void free_stmt(Stmt*s){if(!s)return;free(s->var);free_expr(s->expr);free_expr(s->cond);for(size_t i=0;i<s->nthen;i++)free_stmt(s->then[i]);free(s->then);for(size_t i=0;i<s->nels;i++)free_stmt(s->els[i]);free(s->els);for(size_t i=0;i<s->nloop;i++)free_stmt(s->loop[i]);free(s->loop);free(s->loop_var);free_expr(s->range_expr);free(s->asm_text);free(s);}
 static void free_fn(FnDef*f){if(!f)return;free(f->name);for(size_t i=0;i<f->nparams;i++)free(f->params[i]);free(f->params);free(f->param_types);for(size_t i=0;i<f->nbody;i++)free_stmt(f->body[i]);free(f->body);}
 static void free_program(Program*p){for(size_t i=0;i<p->nfns;i++)free_fn(&p->fns[i]);free(p->fns);}
 
@@ -151,6 +151,11 @@ static bool scope_add(Scope*sc,const char*name,Type type,int is_param){
     for(size_t i=0;i<sc->count;i++)if(strcmp(sc->syms[i].name,name)==0){ERR("variable '%s' already declared",name);return false;}
     if(sc->count==sc->cap){size_t nc=sc->cap?sc->cap*2:8;Symbol*np=realloc(sc->syms,nc*sizeof(Symbol));if(!np)return false;sc->syms=np;sc->cap=nc;}
     sc->syms[sc->count].name=xdup(name);sc->syms[sc->count].type=type;sc->syms[sc->count].is_param=is_param;sc->count++;return true;
+}
+static bool parse_qualified_type_ref(const char**pp,Type*out,int*is_volatile){
+    *is_volatile=0;skip(pp);
+    if(strncmp(*pp,"volatile",8)==0&&!is_icc((*pp)[8])){*is_volatile=1;(*pp)+=8;skip(pp);}
+    return parse_type_ref(pp,out);
 }
 
 static Expr*parse_expr(const char**pp);
@@ -205,6 +210,7 @@ static Expr*parse_factor(const char**pp){
         char id[128];size_t n=0;while(is_icc(**pp)){if(n+1>=sizeof(id))return NULL;id[n++]=**pp;(*pp)++;}id[n]=0;skip(pp);
         if(**pp=='('){
             if(strcmp(id,"int")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT_CAST;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
+            if(strcmp(id,"in")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_IN;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);ERR("TypeError: in() expects one argument");return NULL;}return e;}
             if(strcmp(id,"alloc")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_ALLOC;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
             if(strcmp(id,"free")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_FREE;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
             Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_CALL;e->fn=xdup(id);if(!parse_args(pp,&e->args,&e->argc)){free_expr(e);return NULL;}return e;
@@ -260,6 +266,19 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
     if(strcmp(s,"break")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_BREAK;st->line=line_no;(*idx)++;res=st;}goto done;}
     if(strcmp(s,"continue")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_CONTINUE;st->line=line_no;(*idx)++;res=st;}goto done;}
     if(strncmp(s,"print",5)==0&&s[5]=='('){const char*p=s+5;Expr**args;size_t ac;if(!parse_args(&p,&args,&ac))goto done;skip(&p);if(*p||ac!=1){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(args[0]);free(args);goto done;}st->kind=SK_PRINT;st->line=line_no;st->expr=args[0];free(args);(*idx)++;res=st;goto done;}
+        if(strncmp(s,"asm",3)==0&&s[3]=='('){
+            const char*p=s+3;Expr**args;size_t ac;if(!parse_args(&p,&args,&ac))goto done;skip(&p);
+            if(*p||ac!=1||args[0]->kind!=EK_STRING){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);ERR("TypeError: asm() expects a single string literal");goto done;}
+            Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(args[0]);free(args);goto done;}
+            st->kind=SK_ASM;st->line=line_no;st->asm_text=xdup(args[0]->sval);
+            free_expr(args[0]);free(args);(*idx)++;res=st;goto done;
+        }
+        if(strncmp(s,"out",3)==0&&s[3]=='('){
+            const char*p=s+3;Expr**args;size_t ac;if(!parse_args(&p,&args,&ac))goto done;skip(&p);
+            if(*p||ac!=2){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);ERR("TypeError: out() expects two arguments");goto done;}
+            Stmt*st=calloc(1,sizeof(Stmt));if(!st){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);goto done;}
+            st->kind=SK_OUT;st->line=line_no;st->cond=args[0];st->expr=args[1];free(args);(*idx)++;res=st;goto done;
+        }
     if(strncmp(s,"for",3)==0&&isspace((unsigned char)s[3])){
         const char*fs=ltrim(s+3);char varname[128];size_t vn=0;
         while(*fs&&is_icc(*fs)&&vn<sizeof(varname)-1)varname[vn++]=*fs++;varname[vn]=0;
@@ -316,25 +335,25 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
     {bool in=false,esc=false;char*eq=NULL;for(char*p2=s;*p2;p2++){if(*p2=='\\'&&!esc&&in){esc=true;continue;}if(*p2=='"'&&!esc)in=!in;if(*p2=='='&&!in&&p2[1]!='='){eq=p2;break;}esc=false;}
      if(eq){char*lhs=xndup(s,(size_t)(eq-s));rtrim(lhs);const char*lt2=ltrim(lhs);
         if(*lt2=='*'&&lt2[1]!='='){Expr*target=parse_expr_s(lt2);if(!target){free(lhs);goto done;}Expr*val=parse_expr_s(ltrim(eq+1));if(!val){free(lhs);free_expr(target);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free(lhs);free_expr(target);free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=NULL;st->expr=val;st->cond=target;(*idx)++;res=st;free(lhs);goto done;}
-        const char*tp=lt2;Type declared=type_unknown();
-        if(parse_type_ref(&tp,&declared)){
+        const char*tp=lt2;Type declared=type_unknown();int is_volatile=0;
+        if(parse_qualified_type_ref(&tp,&declared,&is_volatile)){
             skip(&tp);char id[128];size_t n=0;while(is_icc(*tp)){if(n+1>=sizeof(id)){free(lhs);goto done;}id[n++]=*tp++;}id[n]=0;
-            if(n&&!*ltrim(tp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=xdup(id);st->expr=val;st->var_type=declared;(*idx)++;res=st;goto done;}
+            if(n&&!*ltrim(tp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=xdup(id);st->expr=val;st->var_type=declared;st->var_volatile=is_volatile;(*idx)++;res=st;goto done;}
         }
         char id[128];size_t n=0;const char*lp=lt2;while(is_icc(*lp)){if(n+1>=sizeof(id)){free(lhs);goto done;}id[n++]=*lp++;}id[n]=0;
         if(n&&!*ltrim(lp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=xdup(id);st->expr=val;(*idx)++;res=st;goto done;}
         free(lhs);
     }}
     {
-        const char*dp=s;Type decl_t=type_unknown();
-        if(parse_type_ref(&dp,&decl_t)){
+        const char*dp=s;Type decl_t=type_unknown();int is_volatile=0;
+        if(parse_qualified_type_ref(&dp,&decl_t,&is_volatile)){
             skip(&dp);if(is_ic(*dp)){
                 char id[128];size_t n=0;while(is_icc(*dp)){if(n+1>=sizeof(id)){goto done;}id[n++]=*dp++;}id[n]=0;skip(&dp);
-                if(n&&!*dp){Stmt*st=calloc(1,sizeof(Stmt));if(!st)goto done;st->kind=SK_DECL;st->line=line_no;st->var=xdup(id);st->var_type=decl_t;(*idx)++;res=st;goto done;}
+                if(n&&!*dp){Stmt*st=calloc(1,sizeof(Stmt));if(!st)goto done;st->kind=SK_DECL;st->line=line_no;st->var=xdup(id);st->var_type=decl_t;st->var_volatile=is_volatile;(*idx)++;res=st;goto done;}
             }
         }
     }
-    {const char*p2=s;Expr*e=parse_expr(&p2);skip(&p2);if(e&&!*p2&&(e->kind==EK_CALL||e->kind==EK_FREE)){Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(e);goto done;}st->kind=SK_CALL;st->line=line_no;st->expr=e;(*idx)++;res=st;goto done;}free_expr(e);}
+    {const char*p2=s;Expr*e=parse_expr(&p2);skip(&p2);if(e&&!*p2&&(e->kind==EK_CALL||e->kind==EK_FREE||e->kind==EK_IN)){Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(e);goto done;}st->kind=SK_CALL;st->line=line_no;st->expr=e;(*idx)++;res=st;goto done;}free_expr(e);}
     ERR("unknown statement: %.80s",s);
 done:free(s);return res;
 }
@@ -401,6 +420,7 @@ static Type type_check_expr(Expr*e,Scope*sc,Program*prog,bool in_unsafe){
     case EK_PTR_CAST:{if(e->argc!=1)return type_unknown();if(!type_is_ptr(e->cast_type)){TERR("TypeError: cast target must be pointer type");return type_unknown();}Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!(type_eq(at,type_int())||type_is_ptr(at))){TERR("TypeError: cannot cast %s to %s",type_name(at),type_name(e->cast_type));return type_unknown();}e->type=e->cast_type;return e->type;}
     case EK_ALLOC:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_eq(at,type_int())){TERR("TypeError: alloc() requires int, got %s",type_name(at));return type_unknown();}e->type=type_null_ptr();return e->type;}
     case EK_FREE:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_is_ptr(at)){TERR("TypeError: free() requires pointer, got %s",type_name(at));return type_unknown();}e->type=type_void();return e->type;}
+    case EK_IN:{if(e->argc!=1)return type_unknown();if(!in_unsafe){TERR("UnsafeError: in() requires unsafe block");return type_unknown();}Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_eq(at,type_int())){TERR("TypeError: in() port must be int, got %s",type_name(at));return type_unknown();}e->type=type_int();return e->type;}
     case EK_DEREF:{Type it=type_check_expr(e->left,sc,prog,in_unsafe);if(type_is_unknown(it))return type_unknown();if(!in_unsafe){TERR("UnsafeError: dereference requires unsafe block");return type_unknown();}if(!type_is_ptr(it)){TERR("TypeError: cannot dereference %s",type_name(it));return type_unknown();}if(it.base==BASE_VOID&&it.ptr_depth==1){TERR("TypeError: cannot dereference ptr<void>");return type_unknown();}e->type=type_deref(it);return e->type;}
     case EK_ADDROF:{Type it=type_check_expr(e->left,sc,prog,in_unsafe);if(type_is_unknown(it))return type_unknown();if(e->left->kind!=EK_VAR){TERR("TypeError: address-of requires variable");return type_unknown();}e->type=type_addr_of(it);return e->type;}
     case EK_CALL:{FnDef*fn=find_fn(prog,e->fn);if(!fn){TERR("TypeError: undefined function '%s'",e->fn);return type_unknown();}if(fn->nparams!=e->argc){TERR("TypeError: function '%s' expects %zu args, got %zu",e->fn,fn->nparams,e->argc);return type_unknown();}for(size_t i=0;i<e->argc;i++){Type at=type_check_expr(e->args[i],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_assignable(fn->param_types[i],at)){TERR("TypeError: arg %zu of '%s' expects %s, got %s",i+1,e->fn,type_name(fn->param_types[i]),type_name(at));return type_unknown();}}e->type=fn->return_type;return e->type;}
@@ -426,6 +446,8 @@ static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop,bool in_un
     case SK_IF:{Type ct=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);if(s->nels>0){Scope e_scope;scope_init(&e_scope,sc);if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop,in_unsafe)){scope_free(&e_scope);return false;}scope_free(&e_scope);}return true;}
     case SK_WHILE:{Type ct=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);return true;}
     case SK_UNSAFE:{Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,in_loop,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_ASM:{if(!in_unsafe){TERR("UnsafeError: asm requires unsafe block");return false;}return true;}
+    case SK_OUT:{if(!in_unsafe){TERR("UnsafeError: out() requires unsafe block");return false;}Type pt=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(pt))return false;if(!type_eq(pt,type_int())){TERR("TypeError: out() port must be int, got %s",type_name(pt));return false;}Type vt=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(vt))return false;if(!type_eq(vt,type_int())){TERR("TypeError: out() value must be int, got %s",type_name(vt));return false;}return true;}
     case SK_FOR:{Type rt=type_check_expr(s->range_expr,sc,prog,in_unsafe);if(type_is_unknown(rt))return false;if(!type_eq(rt,type_int())){TERR("TypeError: range expression must be int, got %s",type_name(rt));return false;}Scope inner;scope_init(&inner,sc);if(!scope_add(&inner,s->loop_var,type_int(),0)){scope_free(&inner);return false;}if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);return true;}
     case SK_RETURN:{if(s->expr){Type t=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(t))return false;}return true;}
     case SK_BREAK:case SK_CONTINUE:if(!in_loop){TERR("TypeError: break/continue outside loop");return false;}return true;
@@ -475,6 +497,7 @@ static bool cg_expr_val(CG*g,Expr*e,SBuf*result,bool no_runtime){
     case EK_PTR_NULL:sb_cat(result,"((void*)0)");return true;
     case EK_VAR:sb_cat(result,e->name);return true;
     case EK_INT_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((long long)(%s))",a.d);sb_free(&a);return true;}
+    case EK_IN:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((long long)aut_in8((unsigned short)(%s)))",a.d);sb_free(&a);return true;}
     case EK_PTR_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((%s)(unsigned long long)(%s))",cg_type(e->cast_type),a.d);sb_free(&a);return true;}
     case EK_ALLOC:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"aut_alloc((unsigned long long)(%s))",a.d);else sb_fmt(result,"malloc((size_t)(%s))",a.d);sb_free(&a);return true;}
     case EK_FREE:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"(aut_free(%s),(void*)0)",a.d);else sb_fmt(result,"(free(%s),(void*)0)",a.d);sb_free(&a);return true;}
@@ -508,6 +531,8 @@ static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp,bool no_runtime){
         case SK_IF:{SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"    if(%s) {\n",c.d);sb_free(&c);if(!cg_stmts(g,s->then,s->nthen,inlp,no_runtime))return false;if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,inlp,no_runtime))return false;}E(g,"    }\n");break;}
         case SK_WHILE:{E(g,"    while(1) {\n");SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"        if(!(%s)) break;\n",c.d);sb_free(&c);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"    }\n");break;}
         case SK_UNSAFE:{if(!cg_stmts(g,s->loop,s->nloop,inlp,no_runtime))return false;break;}
+        case SK_ASM:{char*esc=escape_for_c(s->asm_text?s->asm_text:"");if(!esc)return false;E(g,"    __asm__ __volatile__(\"%s\");\n",esc);free(esc);break;}
+        case SK_OUT:{SBuf p,v;sb_init(&p);sb_init(&v);if(!cg_expr_val(g,s->cond,&p,no_runtime)||!cg_expr_val(g,s->expr,&v,no_runtime)){sb_free(&p);sb_free(&v);return false;}E(g,"    aut_out8((unsigned short)(%s), (unsigned char)(%s));\n",p.d,v.d);sb_free(&p);sb_free(&v);break;}
         case SK_FOR:{size_t lf=L(g);Expr*r=s->range_expr;SBuf st,ed,sp;sb_init(&st);sb_init(&ed);sb_init(&sp);if(!cg_expr_val(g,r->range_start,&st,no_runtime)||!cg_expr_val(g,r->range_end,&ed,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}if(r->range_step&&!cg_expr_val(g,r->range_step,&sp,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}E(g,"    {\n");E(g,"        long long _s%zu = %s, _e%zu = %s;\n",lf,st.d,lf,ed.d);if(r->range_step)E(g,"        long long _p%zu = %s;\n",lf,sp.d);else E(g,"        long long _p%zu = (_s%zu <= _e%zu) ? 1 : -1;\n",lf,lf,lf);sb_free(&st);sb_free(&ed);sb_free(&sp);E(g,"        for(%s = _s%zu; ",s->loop_var,lf);if(r->range_inclusive)E(g,"(_p%zu > 0) ? (%s <= _e%zu) : (%s >= _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);else E(g,"(_p%zu > 0) ? (%s < _e%zu) : (%s > _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);E(g,"%s += _p%zu) {\n",s->loop_var,lf);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"        }\n");E(g,"    }\n");break;}
         case SK_RETURN:{if(s->expr){SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    return %s;\n",e.d);sb_free(&e);}else E(g,"    return 0;\n");break;}
         case SK_BREAK:E(g,"    break;\n");break;
@@ -518,10 +543,10 @@ static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp,bool no_runtime){
     }
     return true;
 }
-typedef struct{char*name;Type type;}VarInfo;
+typedef struct{char*name;Type type;int is_volatile;}VarInfo;
 static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size_t*cap,FnDef*fn){
     for(size_t i=0;i<nbody;i++){Stmt*s=body[i];
-        if((s->kind==SK_ASSIGN||s->kind==SK_DECL)&&s->var){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->var);(*vars)[*count].type=type_is_unknown(s->var_type)?type_int():s->var_type;(*count)++;}}
+        if((s->kind==SK_ASSIGN||s->kind==SK_DECL)&&s->var){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->var);(*vars)[*count].type=type_is_unknown(s->var_type)?type_int():s->var_type;(*vars)[*count].is_volatile=s->var_volatile;(*count)++;}}
         if(s->kind==SK_IF){if(!collect_vars(s->then,s->nthen,vars,count,cap,fn))return false;if(!collect_vars(s->els,s->nels,vars,count,cap,fn))return false;}
         if(s->kind==SK_WHILE){if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
         if(s->kind==SK_UNSAFE){if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
@@ -534,7 +559,7 @@ static bool cg_fn(CG*g,FnDef*fn,const Program*prog,bool no_runtime){
     for(size_t i=0;i<fn->nparams;i++){if(i)E(g,", ");E(g,"%s %s",cg_type(fn->param_types[i]),fn->params[i]);}
     E(g,") {\n");VarInfo*vars=NULL;size_t vcount=0,vcap=0;
     if(!collect_vars(fn->body,fn->nbody,&vars,&vcount,&vcap,fn)){free(vars);return false;}
-    for(size_t i=0;i<vcount;i++){E(g,"    %s %s = 0;\n",cg_type(vars[i].type),vars[i].name);free(vars[i].name);}
+    for(size_t i=0;i<vcount;i++){E(g,"    %s%s %s = 0;\n",vars[i].is_volatile?"volatile ":"",cg_type(vars[i].type),vars[i].name);free(vars[i].name);}
     free(vars);if(!cg_stmts(g,fn->body,fn->nbody,false,no_runtime))return false;E(g,"    return 0;\n");E(g,"}\n\n");return true;
 }
 static bool codegen(const Program*prog,const char*out_path,bool no_runtime){
@@ -548,6 +573,8 @@ static bool codegen(const Program*prog,const char*out_path,bool no_runtime){
     }else{
         E(&g,"#include <stdio.h>\n#include <stdlib.h>\n\n");
     }
+    E(&g,"static inline unsigned char aut_in8(unsigned short port) { unsigned char value; __asm__ __volatile__(\"inb %1, %0\" : \"=a\"(value) : \"Nd\"(port)); return value; }\n");
+    E(&g,"static inline void aut_out8(unsigned short port, unsigned char value) { __asm__ __volatile__(\"outb %0, %1\" :: \"a\"(value), \"Nd\"(port)); }\n\n");
     for(size_t i=0;i<prog->nfns;i++){E(&g,"static %s _fn_%s(",cg_type(prog->fns[i].return_type),prog->fns[i].name);for(size_t j=0;j<prog->fns[i].nparams;j++){if(j)E(&g,", ");E(&g,"%s",cg_type(prog->fns[i].param_types[j]));}E(&g,");\n");}E(&g,"\n");
     for(size_t i=0;i<prog->nfns;i++){if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog,no_runtime)){cg_free(&g);return false;}}
     if(no_runtime)E(&g,"void aut_entry(void) { (void)_fn_main(); }\n");

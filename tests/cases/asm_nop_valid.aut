@@ -1,0 +1,4 @@
+fn main():
+    unsafe:
+        asm("nop")
+    print(1)

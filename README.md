@@ -38,6 +38,9 @@ fn main():
 - `for var in range:` loops with native range syntax
 - Function parameters and calls
 - Controlled raw pointer access via `unsafe:` blocks
+- Inline assembly: `asm("...")` (string literal only)
+- Port I/O primitives: `out(port, value)` and `in(port)`
+- Volatile typed pointers: `volatile ptr<T> name`
 - Command-line options: `--help`, `--version`, `--metadata`
 
 ## Native Range Syntax
@@ -142,6 +145,10 @@ fn main():
 | `free(ptr)` | Free allocated memory |
 | `unsafe: *expr` | Dereference pointer (read/write) only in unsafe block |
 | `&var` | Get address of variable |
+| `asm("...")` | Emit inline GCC assembly (unsafe block only) |
+| `out(port, value)` | Write 8-bit value to I/O port (unsafe block only) |
+| `in(port)` | Read 8-bit value from I/O port (unsafe block only) |
+| `volatile ptr<T> p` | Declare volatile pointer for MMIO |
 | `ptr<T>(value)` | Cast integer/pointer to typed pointer |
 | `int(ptr_val)` | Cast pointer to integer |
 | `null` / `NULL` | Null pointer constant |

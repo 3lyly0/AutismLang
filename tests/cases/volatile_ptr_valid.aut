@@ -1,0 +1,6 @@
+fn main():
+    int x = 64
+    volatile ptr<int> p = &x
+    unsafe:
+        *p = 66
+    print(x)

@@ -1,0 +1,2 @@
+fn main():
+    out(0x3D4, 0)

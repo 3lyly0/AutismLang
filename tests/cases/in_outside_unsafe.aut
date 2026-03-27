@@ -1,0 +1,3 @@
+fn main():
+    x = in(0x60)
+    print(x)
