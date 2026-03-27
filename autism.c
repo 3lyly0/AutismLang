@@ -573,8 +573,24 @@ static bool codegen(const Program*prog,const char*out_path,bool no_runtime){
     }else{
         E(&g,"#include <stdio.h>\n#include <stdlib.h>\n\n");
     }
-    E(&g,"static inline unsigned char aut_in8(unsigned short port) { unsigned char value; __asm__ __volatile__(\"inb %1, %0\" : \"=a\"(value) : \"Nd\"(port)); return value; }\n");
-    E(&g,"static inline void aut_out8(unsigned short port, unsigned char value) { __asm__ __volatile__(\"outb %0, %1\" :: \"a\"(value), \"Nd\"(port)); }\n\n");
+    E(&g,"static inline unsigned char aut_in8(unsigned short port) {\n");
+    E(&g,"#if defined(__i386__) || defined(__x86_64__)\n");
+    E(&g,"    unsigned char value;\n");
+    E(&g,"    __asm__ __volatile__(\"inb %%1, %%0\" : \"=a\"(value) : \"Nd\"(port));\n");
+    E(&g,"    return value;\n");
+    E(&g,"#else\n");
+    E(&g,"    (void)port;\n");
+    E(&g,"    return 0;\n");
+    E(&g,"#endif\n");
+    E(&g,"}\n");
+    E(&g,"static inline void aut_out8(unsigned short port, unsigned char value) {\n");
+    E(&g,"#if defined(__i386__) || defined(__x86_64__)\n");
+    E(&g,"    __asm__ __volatile__(\"outb %%0, %%1\" :: \"a\"(value), \"Nd\"(port));\n");
+    E(&g,"#else\n");
+    E(&g,"    (void)port;\n");
+    E(&g,"    (void)value;\n");
+    E(&g,"#endif\n");
+    E(&g,"}\n\n");
     for(size_t i=0;i<prog->nfns;i++){E(&g,"static %s _fn_%s(",cg_type(prog->fns[i].return_type),prog->fns[i].name);for(size_t j=0;j<prog->fns[i].nparams;j++){if(j)E(&g,", ");E(&g,"%s",cg_type(prog->fns[i].param_types[j]));}E(&g,");\n");}E(&g,"\n");
     for(size_t i=0;i<prog->nfns;i++){if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog,no_runtime)){cg_free(&g);return false;}}
     if(no_runtime)E(&g,"void aut_entry(void) { (void)_fn_main(); }\n");
