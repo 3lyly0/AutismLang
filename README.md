@@ -1,4 +1,4 @@
-# AutismLang (v0.4.0)
+# AutismLang (v0.5.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
@@ -19,9 +19,10 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.4.0)
+## Implemented Features (v0.5.0)
 
 - Function declaration with `fn name():`
+- Function parameters require explicit types: `fn add(int a, int b):`
 - Required entry point: `fn main():`
 - Indentation-based function body (4 spaces)
 - Variable assignment with Python-like style: `name = expression`
@@ -38,7 +39,7 @@ fn main():
 - Function parameters and calls
 - Command-line options: `--help`, `--version`, `--metadata`
 
-## NEW: Native Range Syntax (v0.4.0)
+## Native Range Syntax
 
 AutismLang now supports a clean, expressive range syntax for loops:
 
@@ -101,7 +102,7 @@ AutismLang supports low-level pointer operations for OS development:
 
 ```aut
 fn main():
-    ptr x = alloc(8)    # Allocate 8 bytes, returns pointer
+    ptr<void> x = alloc(8)    # Allocate bytes, generic pointer
     *x = 42             # Dereference and assign
     print(*x)           # Dereference and read (prints 42)
     free(x)             # Free allocated memory
@@ -112,7 +113,7 @@ fn main():
 ```aut
 fn main():
     int y = 100
-    ptr p = &y          # Get address of variable
+    ptr<int> p = &y     # Get typed address of variable
     print(*p)           # Dereference (prints 100)
 ```
 
@@ -121,23 +122,23 @@ fn main():
 ```aut
 fn main():
     # Cast integer to pointer (for memory-mapped I/O)
-    ptr vga = ptr(0xB8000)   # VGA text buffer address
+    ptr<void> vga = ptr<void>(0xB8000)   # VGA text buffer address
     
     # Cast pointer to integer
     int addr = int(p)
     addr = addr + 8
-    ptr p2 = ptr(addr)
+    ptr<void> p2 = ptr<void>(addr)
 ```
 
 ### Available Pointer Operations
 
 | Operation | Description |
 |-----------|-------------|
-| `ptr x = alloc(size)` | Allocate memory, returns pointer |
+| `ptr<void> x = alloc(size)` | Allocate memory, returns generic pointer |
 | `free(ptr)` | Free allocated memory |
 | `*expr` | Dereference pointer (read/write) |
 | `&var` | Get address of variable |
-| `ptr(int_val)` | Cast integer to pointer |
+| `ptr<T>(value)` | Cast integer/pointer to typed pointer |
 | `int(ptr_val)` | Cast pointer to integer |
 | `null` / `NULL` | Null pointer constant |
 
@@ -146,7 +147,7 @@ fn main():
 Integer literals support hexadecimal notation for memory addresses:
 
 ```aut
-ptr vga = ptr(0xB8000)   # VGA text buffer
+ptr<void> vga = ptr<void>(0xB8000)   # VGA text buffer
 ```
 
 ## Quick Start
@@ -176,6 +177,30 @@ gcc -O2 build/hello.c -o build/hello.exe
 make test
 ```
 
+## Kernel/Freestanding Output
+
+Use no-runtime mode to emit C without libc headers and without built-in runtime helpers:
+
+```bash
+./autism examples/hello.aut --no-runtime -o build/hello_kernel.c
+```
+
+In this mode, generated C:
+
+- keeps string values as static `const char*` literals
+- does not emit heap string helpers (no `strdup`, no `aut_copy`)
+- does not include `<stdio.h>`, `<stdlib.h>`, or `<string.h>`
+- calls external hooks you provide:
+
+```c
+void aut_print_i64(long long value);
+void aut_print_str(const char* value);
+void* aut_alloc(unsigned long long size);
+void aut_free(void* ptr);
+```
+
+Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
+
 ## Version Metadata
 
 - Semantic version is stored in `VERSION.json`
@@ -193,7 +218,14 @@ make test
 
 ## Changelog
 
-### v0.4.0 (Current)
+### v0.5.0 (Current)
+- **Typed pointer system**: `ptr<T>` declarations and `ptr<T>(value)` casts
+- **Strict static typing**: compile-time checks across `int`, `bool`, `str`, and pointer types
+- **Pointer safety checks**: typed dereference/assignment validation and pointer arithmetic rules
+- **Kernel/freestanding mode**: `--no-runtime` output with `aut_entry()` and external hooks
+- **Runtime minimization**: static string literals and no heap string helper runtime in no-runtime mode
+
+### Previous Range Release
 - **Native range syntax**: `for i in 0..10:` (exclusive)
 - **Inclusive range**: `for i in 0..=10:` (inclusive end)
 - **Step specification**: `for i in 0..10..2:` (with custom step)
@@ -203,15 +235,15 @@ make test
 
 ### v0.3.0
 - Pointer operations: `alloc()`, `free()`, `*` (dereference), `&` (address-of)
-- Pointer type annotation: `ptr x = alloc(8)`
-- Pointer casting: `ptr(int)`, `int(ptr)`
+- Pointer type annotation: `ptr<T>` (for example `ptr<int>`, `ptr<void>`)
+- Pointer casting: `ptr<T>(value)`, `int(ptr)`
 - Hexadecimal integer literals: `0xB8000`
 - Null pointer: `null`, `NULL`
 
 ### v0.2.0
 - Static typing with type inference
-- Type annotations: `int x = 5`, `bool flag = true`
-- String type support
+- Type annotations: `int x = 5`, `bool flag = true`, `ptr p = null`, `str s = "hi"`
+- String type support (`str`, static `const char*` mapping)
 
 ### v0.1.0
 - Basic function definitions

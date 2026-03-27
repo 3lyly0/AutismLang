@@ -1,0 +1,9 @@
+fn main():
+    ptr<int> q
+    ptr<void> raw
+    x = 10
+    p = &x
+    q = p
+    raw = q
+    *p = 20
+    print(x)

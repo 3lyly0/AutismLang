@@ -1,4 +1,4 @@
-fn rank_from_score(score):
+fn rank_from_score(int score):
     if score >= 80:
         return "Legend"
     else:
@@ -10,7 +10,7 @@ fn rank_from_score(score):
             else:
                 return "Rookie"
 
-fn fight(name):
+fn fight(str name):
     hp = 30
     boss_hp = 40
     potions = 2

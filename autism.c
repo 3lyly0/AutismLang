@@ -1,9 +1,3 @@
-/*
- * AutismLang Compiler v0.4.0 - Native range syntax
- * for i in 0..10:   (exclusive, step=1)
- * for i in 0..=10:  (inclusive, step=1)
- * for i in 0..10..2: (exclusive, step=2)
- */
 #include <ctype.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -19,7 +13,7 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
-#define AUTISMLANG_VERSION "0.4.0"
+#define AUTISMLANG_VERSION "0.5.0"
 static char g_err[512];
 #define ERR(...) snprintf(g_err,sizeof(g_err),__VA_ARGS__)
 
@@ -73,22 +67,74 @@ static size_t blk_end(const SList*lines,size_t start,size_t lim,size_t ind){
     return i;
 }
 
-typedef enum{TYPE_UNKNOWN=0,TYPE_INT,TYPE_PTR,TYPE_BOOL,TYPE_STRING,TYPE_VOID}TypeKind;
-static const char*type_name(TypeKind t){switch(t){case TYPE_INT:return"int";case TYPE_PTR:return"ptr";case TYPE_BOOL:return"bool";case TYPE_STRING:return"string";case TYPE_VOID:return"void";default:return"unknown";}}
+typedef enum{BASE_UNKNOWN=0,BASE_INT,BASE_BOOL,BASE_STRING,BASE_VOID}BaseType;
+typedef struct{BaseType base;unsigned ptr_depth;}Type;
+static void skip(const char**pp);
+
+static Type type_make(BaseType b,unsigned d){Type t;t.base=b;t.ptr_depth=d;return t;}
+static Type type_unknown(void){return type_make(BASE_UNKNOWN,0);}
+static Type type_int(void){return type_make(BASE_INT,0);}
+static Type type_bool(void){return type_make(BASE_BOOL,0);}
+static Type type_string(void){return type_make(BASE_STRING,0);}
+static Type type_void(void){return type_make(BASE_VOID,0);}
+static Type type_null_ptr(void){return type_make(BASE_VOID,1);} /* ptr<void> */
+static bool type_is_unknown(Type t){return t.base==BASE_UNKNOWN&&t.ptr_depth==0;}
+static bool type_is_ptr(Type t){return t.ptr_depth>0;}
+static bool type_eq(Type a,Type b){return a.base==b.base&&a.ptr_depth==b.ptr_depth;}
+static Type type_addr_of(Type t){if(type_is_unknown(t))return type_unknown();return type_make(t.base,t.ptr_depth+1);}
+static Type type_deref(Type t){if(!type_is_ptr(t))return type_unknown();return type_make(t.base,t.ptr_depth-1);}
+static bool type_assignable(Type dst,Type src){
+    if(type_eq(dst,src))return true;
+    if(type_is_ptr(dst)&&type_eq(src,type_null_ptr()))return true;
+    if(type_is_ptr(dst)&&type_is_ptr(src)&&dst.ptr_depth==src.ptr_depth&&(dst.base==BASE_VOID||src.base==BASE_VOID))return true;
+    return false;
+}
+static const char*type_name(Type t){
+    static char bufs[8][96];static int bi=0;char inner[96];
+    const char*base="unknown";
+    if(t.base==BASE_INT)base="int";
+    else if(t.base==BASE_BOOL)base="bool";
+    else if(t.base==BASE_STRING)base="str";
+    else if(t.base==BASE_VOID)base="void";
+    snprintf(inner,sizeof(inner),"%s",base);
+    for(unsigned i=0;i<t.ptr_depth;i++){
+        char wrapped[96];snprintf(wrapped,sizeof(wrapped),"ptr<%s>",inner);snprintf(inner,sizeof(inner),"%s",wrapped);
+    }
+    bi=(bi+1)%8;snprintf(bufs[bi],sizeof(bufs[bi]),"%s",inner);return bufs[bi];
+}
+static bool parse_type_ref(const char**pp,Type*out){
+    skip(pp);
+    if(strncmp(*pp,"ptr",3)==0&&!is_icc((*pp)[3])){
+        (*pp)+=3;skip(pp);
+        if(**pp!='<'){*out=type_null_ptr();return true;}
+        (*pp)++;
+        Type inner;if(!parse_type_ref(pp,&inner))return false;
+        skip(pp);if(**pp!='>'){ERR("expected '>' in pointer type");return false;}
+        (*pp)++;
+        if(inner.ptr_depth==255){ERR("pointer nesting too deep");return false;}
+        *out=type_make(inner.base,inner.ptr_depth+1);return true;
+    }
+    if(strncmp(*pp,"int",3)==0&&!is_icc((*pp)[3])){(*pp)+=3;*out=type_int();return true;}
+    if(strncmp(*pp,"bool",4)==0&&!is_icc((*pp)[4])){(*pp)+=4;*out=type_bool();return true;}
+    if(strncmp(*pp,"str",3)==0&&!is_icc((*pp)[3])){(*pp)+=3;*out=type_string();return true;}
+    if(strncmp(*pp,"string",6)==0&&!is_icc((*pp)[6])){(*pp)+=6;*out=type_string();return true;}
+    if(strncmp(*pp,"void",4)==0&&!is_icc((*pp)[4])){(*pp)+=4;*out=type_void();return true;}
+    ERR("unknown type");return false;
+}
 
 typedef enum{EK_INT,EK_BOOL,EK_STRING,EK_VAR,EK_BINOP,EK_CALL,EK_PTR_NULL,EK_INT_CAST,EK_DEREF,EK_ADDROF,EK_ALLOC,EK_FREE,EK_PTR_CAST,EK_RANGE}EK;
 typedef struct Expr{
-    EK kind;TypeKind type;long long ival;char*sval;char*name;char*fn;char op[3];
+    EK kind;Type type;Type cast_type;long long ival;char*sval;char*name;char*fn;char op[3];
     struct Expr*left,*right,**args;size_t argc;
     struct Expr*range_start,*range_end,*range_step;bool range_inclusive;
 }Expr;
-typedef enum{SK_PRINT,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
+typedef enum{SK_PRINT,SK_DECL,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
 typedef struct Stmt{
-    SK kind;char*var;TypeKind var_type;Expr*expr,*cond;
+    SK kind;char*var;Type var_type;Expr*expr,*cond;
     struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
-    char*loop_var;Expr*range_expr;
+    char*loop_var;Expr*range_expr;size_t line;
 }Stmt;
-typedef struct{char*name;char**params;TypeKind*param_types;TypeKind return_type;Stmt**body;size_t nbody;size_t nparams;}FnDef;
+typedef struct{char*name;char**params;Type*param_types;Type return_type;Stmt**body;size_t nbody;size_t nparams;}FnDef;
 typedef struct{FnDef*fns;size_t nfns,cap;}Program;
 
 static void free_expr(Expr*e){if(!e)return;free(e->sval);free(e->name);free(e->fn);free_expr(e->left);free_expr(e->right);for(size_t i=0;i<e->argc;i++)free_expr(e->args[i]);free(e->args);free_expr(e->range_start);free_expr(e->range_end);free_expr(e->range_step);free(e);}
@@ -96,12 +142,12 @@ static void free_stmt(Stmt*s){if(!s)return;free(s->var);free_expr(s->expr);free_
 static void free_fn(FnDef*f){if(!f)return;free(f->name);for(size_t i=0;i<f->nparams;i++)free(f->params[i]);free(f->params);free(f->param_types);for(size_t i=0;i<f->nbody;i++)free_stmt(f->body[i]);free(f->body);}
 static void free_program(Program*p){for(size_t i=0;i<p->nfns;i++)free_fn(&p->fns[i]);free(p->fns);}
 
-typedef struct Symbol{char*name;TypeKind type;int is_param;}Symbol;
+typedef struct Symbol{char*name;Type type;int is_param;}Symbol;
 typedef struct Scope{Symbol*syms;size_t count,cap;struct Scope*parent;}Scope;
 static void scope_init(Scope*sc,Scope*parent){sc->syms=NULL;sc->count=0;sc->cap=0;sc->parent=parent;}
 static void scope_free(Scope*sc){for(size_t i=0;i<sc->count;i++)free(sc->syms[i].name);free(sc->syms);sc->syms=NULL;sc->count=0;sc->cap=0;}
 static Symbol*scope_find(Scope*sc,const char*name){for(size_t i=0;i<sc->count;i++)if(strcmp(sc->syms[i].name,name)==0)return&sc->syms[i];if(sc->parent)return scope_find(sc->parent,name);return NULL;}
-static bool scope_add(Scope*sc,const char*name,TypeKind type,int is_param){
+static bool scope_add(Scope*sc,const char*name,Type type,int is_param){
     for(size_t i=0;i<sc->count;i++)if(strcmp(sc->syms[i].name,name)==0){ERR("variable '%s' already declared",name);return false;}
     if(sc->count==sc->cap){size_t nc=sc->cap?sc->cap*2:8;Symbol*np=realloc(sc->syms,nc*sizeof(Symbol));if(!np)return false;sc->syms=np;sc->cap=nc;}
     sc->syms[sc->count].name=xdup(name);sc->syms[sc->count].type=type;sc->syms[sc->count].is_param=is_param;sc->count++;return true;
@@ -133,7 +179,7 @@ static Expr*parse_range_expr(const char**pp,Expr*start_expr){
     Expr*step_expr=NULL;skip(pp);
     if((*pp)[0]=='.'&&(*pp)[1]=='.'&&(*pp)[2]!='='){(*pp)+=2;skip(pp);step_expr=parse_sum(pp);if(!step_expr){free_expr(start_expr);free_expr(end_expr);ERR("expected step");return NULL;}}
     Expr*e=calloc(1,sizeof(Expr));if(!e){free_expr(start_expr);free_expr(end_expr);free_expr(step_expr);return NULL;}
-    e->kind=EK_RANGE;e->type=TYPE_INT;e->range_start=start_expr;e->range_end=end_expr;e->range_step=step_expr;e->range_inclusive=inclusive;
+    e->kind=EK_RANGE;e->type=type_int();e->range_start=start_expr;e->range_end=end_expr;e->range_step=step_expr;e->range_inclusive=inclusive;
     return e;
 }
 static Expr*parse_factor(const char**pp){
@@ -147,26 +193,38 @@ static Expr*parse_factor(const char**pp){
         if(**pp!='"'){ERR("unterminated string");return NULL;}
         char*raw=xndup(start,(size_t)(*pp-start));(*pp)++;
         char*processed=process_string_escape(raw,strlen(raw));free(raw);if(!processed)return NULL;
-        Expr*e=calloc(1,sizeof(Expr));if(!e){free(processed);return NULL;}e->kind=EK_STRING;e->type=TYPE_STRING;e->sval=processed;return e;
+        Expr*e=calloc(1,sizeof(Expr));if(!e){free(processed);return NULL;}e->kind=EK_STRING;e->type=type_string();e->sval=processed;return e;
     }
     bool neg=false;if(*p=='-'&&isdigit((unsigned char)p[1])){neg=true;(*pp)++;p++;}
     if(isdigit((unsigned char)*p)){
         char*end;int base=10;if(*p=='0'&&(p[1]=='x'||p[1]=='X'))base=16;
         long long v=strtoll(*pp,&end,base);*pp=end;
-        Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->type=TYPE_INT;e->ival=neg?-v:v;return e;
+        Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT;e->type=type_int();e->ival=neg?-v:v;return e;
     }(void)neg;
     if(is_ic(*p)){
         char id[128];size_t n=0;while(is_icc(**pp)){if(n+1>=sizeof(id))return NULL;id[n++]=**pp;(*pp)++;}id[n]=0;skip(pp);
         if(**pp=='('){
             if(strcmp(id,"int")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_INT_CAST;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
-            if(strcmp(id,"ptr")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_PTR_CAST;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
             if(strcmp(id,"alloc")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_ALLOC;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
             if(strcmp(id,"free")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_FREE;if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}if(e->argc!=1){free_expr(e);return NULL;}return e;}
             Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_CALL;e->fn=xdup(id);if(!parse_args(pp,&e->args,&e->argc)){free_expr(e);return NULL;}return e;
         }
-        if(strcmp(id,"True")==0||strcmp(id,"true")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=TYPE_BOOL;e->ival=1;return e;}
-        if(strcmp(id,"False")==0||strcmp(id,"false")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=TYPE_BOOL;e->ival=0;return e;}
-        if(strcmp(id,"null")==0||strcmp(id,"NULL")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_PTR_NULL;e->type=TYPE_PTR;return e;}
+        if(strcmp(id,"ptr")==0&&**pp=='<'){
+            Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_PTR_CAST;
+            (*pp)++;
+            Type inner=type_unknown();
+            if(!parse_type_ref(pp,&inner)){free(e);return NULL;}
+            skip(pp);if(**pp!='>'){free(e);ERR("expected '>' in ptr cast");return NULL;}
+            (*pp)++;
+            e->cast_type=type_make(inner.base,inner.ptr_depth+1);
+            skip(pp);
+            if(!parse_args(pp,&e->args,&e->argc)){free(e);return NULL;}
+            if(e->argc!=1||!type_is_ptr(e->cast_type)){free_expr(e);ERR("ptr cast must be ptr<...>(value)");return NULL;}
+            return e;
+        }
+        if(strcmp(id,"True")==0||strcmp(id,"true")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=type_bool();e->ival=1;return e;}
+        if(strcmp(id,"False")==0||strcmp(id,"false")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_BOOL;e->type=type_bool();e->ival=0;return e;}
+        if(strcmp(id,"null")==0||strcmp(id,"NULL")==0){Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_PTR_NULL;e->type=type_null_ptr();return e;}
         Expr*e=calloc(1,sizeof(Expr));if(!e)return NULL;e->kind=EK_VAR;e->name=xdup(id);return e;
     }
     ERR("unexpected '%c'",(int)*p);return NULL;
@@ -197,10 +255,11 @@ static Expr*parse_expr_s(const char*s){const char*p=s;Expr*e=parse_expr(&p);if(!
 static bool parse_block(const SList*lines,size_t start,size_t end,size_t ind,Stmt***out,size_t*outn);
 static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
     const char*raw=lines->items[*idx];char*s=xdup(raw+ind);rtrim(s);strip_comment(s);Stmt*res=NULL;
-    if(strncmp(s,"return",6)==0&&(s[6]==0||isspace((unsigned char)s[6]))){Stmt*st=calloc(1,sizeof(Stmt));if(!st)goto done;st->kind=SK_RETURN;const char*ex=ltrim(s+6);if(*ex){st->expr=parse_expr_s(ex);if(!st->expr){free(st);goto done;}}(*idx)++;res=st;goto done;}
-    if(strcmp(s,"break")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_BREAK;(*idx)++;res=st;}goto done;}
-    if(strcmp(s,"continue")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_CONTINUE;(*idx)++;res=st;}goto done;}
-    if(strncmp(s,"print",5)==0&&s[5]=='('){const char*p=s+5;Expr**args;size_t ac;if(!parse_args(&p,&args,&ac))goto done;skip(&p);if(*p||ac!=1){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(args[0]);free(args);goto done;}st->kind=SK_PRINT;st->expr=args[0];free(args);(*idx)++;res=st;goto done;}
+    size_t line_no=*idx+1;
+    if(strncmp(s,"return",6)==0&&(s[6]==0||isspace((unsigned char)s[6]))){Stmt*st=calloc(1,sizeof(Stmt));if(!st)goto done;st->kind=SK_RETURN;st->line=line_no;const char*ex=ltrim(s+6);if(*ex){st->expr=parse_expr_s(ex);if(!st->expr){free(st);goto done;}}(*idx)++;res=st;goto done;}
+    if(strcmp(s,"break")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_BREAK;st->line=line_no;(*idx)++;res=st;}goto done;}
+    if(strcmp(s,"continue")==0){Stmt*st=calloc(1,sizeof(Stmt));if(st){st->kind=SK_CONTINUE;st->line=line_no;(*idx)++;res=st;}goto done;}
+    if(strncmp(s,"print",5)==0&&s[5]=='('){const char*p=s+5;Expr**args;size_t ac;if(!parse_args(&p,&args,&ac))goto done;skip(&p);if(*p||ac!=1){for(size_t i=0;i<ac;i++)free_expr(args[i]);free(args);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(args[0]);free(args);goto done;}st->kind=SK_PRINT;st->line=line_no;st->expr=args[0];free(args);(*idx)++;res=st;goto done;}
     if(strncmp(s,"for",3)==0&&isspace((unsigned char)s[3])){
         const char*fs=ltrim(s+3);char varname[128];size_t vn=0;
         while(*fs&&is_icc(*fs)&&vn<sizeof(varname)-1)varname[vn++]=*fs++;varname[vn]=0;
@@ -213,7 +272,7 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         size_t bs=*idx+1,be=blk_end(lines,bs,lim,ind+4);if(bs==be){free_expr(range_expr);ERR("for needs body");goto done;}
         Stmt**lb;size_t lc;if(!parse_block(lines,bs,be,ind+4,&lb,&lc)){free_expr(range_expr);goto done;}*idx=be;
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(range_expr);for(size_t i=0;i<lc;i++)free_stmt(lb[i]);free(lb);goto done;}
-        st->kind=SK_FOR;st->loop_var=xdup(varname);st->loop=lb;st->nloop=lc;st->range_expr=range_expr;res=st;goto done;
+        st->kind=SK_FOR;st->line=line_no;st->loop_var=xdup(varname);st->loop=lb;st->nloop=lc;st->range_expr=range_expr;res=st;goto done;
     }
     if((strncmp(s,"if",2)==0&&isspace((unsigned char)s[2]))||(strncmp(s,"elif",4)==0&&isspace((unsigned char)s[4]))){
         const char*kw=(s[1]=='f')?s+2:s+4;(void)kw; /* skip keyword; cs computed below */
@@ -236,7 +295,7 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
             free(ec2);
         }}
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(cond);for(size_t i=0;i<tc;i++)free_stmt(tb[i]);free(tb);for(size_t i=0;i<ec;i++)free_stmt(eb[i]);free(eb);goto done;}
-        st->kind=SK_IF;st->cond=cond;st->then=tb;st->nthen=tc;st->els=eb;st->nels=ec;res=st;goto done;
+        st->kind=SK_IF;st->line=line_no;st->cond=cond;st->then=tb;st->nthen=tc;st->els=eb;st->nels=ec;res=st;goto done;
     }
     if(strncmp(s,"while",5)==0&&isspace((unsigned char)s[5])){
         const char*cs=ltrim(s+5);size_t cl=strlen(cs);if(!cl||cs[cl-1]!=':'){ERR("while needs ':'");goto done;}
@@ -244,23 +303,31 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         size_t bs=*idx+1,be=blk_end(lines,bs,lim,ind+4);if(bs==be){free_expr(cond);ERR("while needs body");goto done;}
         Stmt**lb;size_t lc;if(!parse_block(lines,bs,be,ind+4,&lb,&lc)){free_expr(cond);goto done;}*idx=be;
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(cond);for(size_t i=0;i<lc;i++)free_stmt(lb[i]);free(lb);goto done;}
-        st->kind=SK_WHILE;st->cond=cond;st->loop=lb;st->nloop=lc;res=st;goto done;
+        st->kind=SK_WHILE;st->line=line_no;st->cond=cond;st->loop=lb;st->nloop=lc;res=st;goto done;
     }
     if(strcmp(s,"else:")==0)goto done;
     {bool in=false,esc=false;char*eq=NULL;for(char*p2=s;*p2;p2++){if(*p2=='\\'&&!esc&&in){esc=true;continue;}if(*p2=='"'&&!esc)in=!in;if(*p2=='='&&!in&&p2[1]!='='){eq=p2;break;}esc=false;}
      if(eq){char*lhs=xndup(s,(size_t)(eq-s));rtrim(lhs);const char*lt2=ltrim(lhs);
-        if(*lt2=='*'&&lt2[1]!='='){Expr*target=parse_expr_s(lt2);if(!target){free(lhs);goto done;}Expr*val=parse_expr_s(ltrim(eq+1));if(!val){free(lhs);free_expr(target);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free(lhs);free_expr(target);free_expr(val);goto done;}st->kind=SK_ASSIGN;st->var=NULL;st->expr=val;st->cond=target;(*idx)++;res=st;free(lhs);goto done;}
-        char type_id[128];size_t tn=0;const char*tp=lt2;while(is_icc(*tp)){if(tn+1>=sizeof(type_id)){free(lhs);goto done;}type_id[tn++]=*tp++;}type_id[tn]=0;skip(&tp);
-        if(tn>0&&is_ic(*tp)){
-            TypeKind var_type=TYPE_INT;if(strcmp(type_id,"ptr")==0)var_type=TYPE_PTR;else if(strcmp(type_id,"bool")==0)var_type=TYPE_BOOL;else if(strcmp(type_id,"string")==0)var_type=TYPE_STRING;
-            char id[128];size_t n=0;while(is_icc(*tp)){if(n+1>=sizeof(id)){free(lhs);goto done;}id[n++]=*tp++;}id[n]=0;
-            if(n&&!*ltrim(tp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->var=xdup(id);st->expr=val;st->var_type=var_type;(*idx)++;res=st;goto done;}
+        if(*lt2=='*'&&lt2[1]!='='){Expr*target=parse_expr_s(lt2);if(!target){free(lhs);goto done;}Expr*val=parse_expr_s(ltrim(eq+1));if(!val){free(lhs);free_expr(target);goto done;}Stmt*st=calloc(1,sizeof(Stmt));if(!st){free(lhs);free_expr(target);free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=NULL;st->expr=val;st->cond=target;(*idx)++;res=st;free(lhs);goto done;}
+        const char*tp=lt2;Type declared=type_unknown();
+        if(parse_type_ref(&tp,&declared)){
+            skip(&tp);char id[128];size_t n=0;while(is_icc(*tp)){if(n+1>=sizeof(id)){free(lhs);goto done;}id[n++]=*tp++;}id[n]=0;
+            if(n&&!*ltrim(tp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=xdup(id);st->expr=val;st->var_type=declared;(*idx)++;res=st;goto done;}
         }
         char id[128];size_t n=0;const char*lp=lt2;while(is_icc(*lp)){if(n+1>=sizeof(id)){free(lhs);goto done;}id[n++]=*lp++;}id[n]=0;
-        if(n&&!*ltrim(lp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->var=xdup(id);st->expr=val;(*idx)++;res=st;goto done;}
+        if(n&&!*ltrim(lp)){free(lhs);Expr*val=parse_expr_s(ltrim(eq+1));if(!val)goto done;Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(val);goto done;}st->kind=SK_ASSIGN;st->line=line_no;st->var=xdup(id);st->expr=val;(*idx)++;res=st;goto done;}
         free(lhs);
     }}
-    {const char*p2=s;Expr*e=parse_expr(&p2);skip(&p2);if(e&&!*p2&&(e->kind==EK_CALL||e->kind==EK_FREE)){Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(e);goto done;}st->kind=SK_CALL;st->expr=e;(*idx)++;res=st;goto done;}free_expr(e);}
+    {
+        const char*dp=s;Type decl_t=type_unknown();
+        if(parse_type_ref(&dp,&decl_t)){
+            skip(&dp);if(is_ic(*dp)){
+                char id[128];size_t n=0;while(is_icc(*dp)){if(n+1>=sizeof(id)){goto done;}id[n++]=*dp++;}id[n]=0;skip(&dp);
+                if(n&&!*dp){Stmt*st=calloc(1,sizeof(Stmt));if(!st)goto done;st->kind=SK_DECL;st->line=line_no;st->var=xdup(id);st->var_type=decl_t;(*idx)++;res=st;goto done;}
+            }
+        }
+    }
+    {const char*p2=s;Expr*e=parse_expr(&p2);skip(&p2);if(e&&!*p2&&(e->kind==EK_CALL||e->kind==EK_FREE)){Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(e);goto done;}st->kind=SK_CALL;st->line=line_no;st->expr=e;(*idx)++;res=st;goto done;}free_expr(e);}
     ERR("unknown statement: %.80s",s);
 done:free(s);return res;
 }
@@ -273,83 +340,93 @@ static bool parse_block(const SList*lines,size_t start,size_t end,size_t ind,Stm
     }
     *out=stmts;*outn=count;return true;
 }
-static bool parse_fn_hdr(const char*raw,char**oname,char***oparams,size_t*opc){
+static bool parse_fn_hdr(const char*raw,char**oname,char***oparams,Type**optypes,size_t*opc){
     const char*p=raw;if(strncmp(p,"fn",2)||!isspace((unsigned char)p[2])){ERR("expected 'fn'");return false;}p+=2;while(*p&&isspace((unsigned char)*p))p++;
     char name[128];size_t n=0;if(!is_ic(*p)){ERR("bad fn name");return false;}while(is_icc(*p)){if(n+1>=sizeof(name)){ERR("name too long");return false;}name[n++]=*p++;}name[n]=0;
     while(*p&&isspace((unsigned char)*p))p++;if(*p!='('){ERR("expected '('");return false;}p++;
-    char**params=NULL;size_t pc=0,pcap=0;
-    while(*p&&*p!=')'){while(*p&&isspace((unsigned char)*p))p++;if(!is_ic(*p)){for(size_t i=0;i<pc;i++)free(params[i]);free(params);ERR("bad param");return false;}
-        char pn[128];size_t pnn=0;while(is_icc(*p)){if(pnn+1>=sizeof(pn)){for(size_t i=0;i<pc;i++)free(params[i]);free(params);ERR("param too long");return false;}pn[pnn++]=*p++;}pn[pnn]=0;
-        if(pc==pcap){size_t nc=pcap?pcap*2:4;char**np=realloc(params,nc*sizeof(char*));if(!np){for(size_t i=0;i<pc;i++)free(params[i]);free(params);return false;}params=np;pcap=nc;}
-        params[pc++]=xdup(pn);while(*p&&isspace((unsigned char)*p))p++;if(*p==',')p++;
+    char**params=NULL;Type*ptypes=NULL;size_t pc=0,pcap=0;
+    while(*p&&*p!=')'){
+        Type pt=type_unknown();
+        if(!parse_type_ref(&p,&pt)){for(size_t i=0;i<pc;i++)free(params[i]);free(params);free(ptypes);ERR("function params require explicit type");return false;}
+        while(*p&&isspace((unsigned char)*p))p++;if(!is_ic(*p)){for(size_t i=0;i<pc;i++)free(params[i]);free(params);free(ptypes);ERR("bad param name");return false;}
+        char pn[128];size_t pnn=0;while(is_icc(*p)){if(pnn+1>=sizeof(pn)){for(size_t i=0;i<pc;i++)free(params[i]);free(params);free(ptypes);ERR("param name too long");return false;}pn[pnn++]=*p++;}pn[pnn]=0;
+        if(pc==pcap){size_t nc=pcap?pcap*2:4;char**np=realloc(params,nc*sizeof(char*));Type*tp=realloc(ptypes,nc*sizeof(Type));if(!np||!tp){for(size_t i=0;i<pc;i++)free(params[i]);free(np?np:params);free(tp?tp:ptypes);ERR("out of memory");return false;}params=np;ptypes=tp;pcap=nc;}
+        params[pc]=xdup(pn);ptypes[pc]=pt;pc++;
+        while(*p&&isspace((unsigned char)*p))p++;if(*p==',')p++;
     }
-    if(*p!=')'){for(size_t i=0;i<pc;i++)free(params[i]);free(params);ERR("missing ')'");return false;}p++;
-    while(*p&&isspace((unsigned char)*p))p++;if(*p!=':'){for(size_t i=0;i<pc;i++)free(params[i]);free(params);ERR("expected ':'");return false;}
-    *oname=xdup(name);*oparams=params;*opc=pc;return true;
+    if(*p!=')'){for(size_t i=0;i<pc;i++)free(params[i]);free(params);free(ptypes);ERR("missing ')'");return false;}p++;
+    while(*p&&isspace((unsigned char)*p))p++;if(*p!=':'){for(size_t i=0;i<pc;i++)free(params[i]);free(params);free(ptypes);ERR("expected ':'");return false;}
+    *oname=xdup(name);*oparams=params;*optypes=ptypes;*opc=pc;return true;
 }
 static bool parse_program(const SList*lines,Program*prog){
     prog->fns=NULL;prog->nfns=0;prog->cap=0;size_t i=0;
     while(i<lines->len){
         const char*r=lines->items[i];char*cp=xdup(r);rtrim(cp);if(blank(cp)){free(cp);i++;continue;}free(cp);
         if(r[0]==' '||r[0]=='\t'){fprintf(stderr,"Error line %zu: unexpected indent\n",i+1);return false;}
-        char*rl=xdup(r);rtrim(rl);strip_comment(rl);char*fn_name;char**params;size_t pc;
-        if(!parse_fn_hdr(rl,&fn_name,&params,&pc)){fprintf(stderr,"Error line %zu: %s\n",i+1,g_err);free(rl);return false;}free(rl);
-        size_t bs=i+1,be=blk_end(lines,bs,lines->len,4);if(bs==be){fprintf(stderr,"Error: fn '%s' empty\n",fn_name);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);return false;}
-        Stmt**body;size_t bc;if(!parse_block(lines,bs,be,4,&body,&bc)){fprintf(stderr,"Error in '%s': %s\n",fn_name,g_err);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);return false;}
-        if(prog->nfns==prog->cap){size_t nc=prog->cap?prog->cap*2:4;FnDef*np=realloc(prog->fns,nc*sizeof(FnDef));if(!np){free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);for(size_t j=0;j<bc;j++)free_stmt(body[j]);free(body);return false;}prog->fns=np;prog->cap=nc;}
-        FnDef*fn=&prog->fns[prog->nfns++];fn->name=fn_name;fn->params=params;fn->nparams=pc;fn->param_types=calloc(pc,sizeof(TypeKind));fn->return_type=TYPE_INT;fn->body=body;fn->nbody=bc;
+        char*rl=xdup(r);rtrim(rl);strip_comment(rl);char*fn_name;char**params;Type*ptypes;size_t pc;
+        if(!parse_fn_hdr(rl,&fn_name,&params,&ptypes,&pc)){fprintf(stderr,"Error line %zu: %s\n",i+1,g_err);free(rl);return false;}free(rl);
+        size_t bs=i+1,be=blk_end(lines,bs,lines->len,4);if(bs==be){fprintf(stderr,"Error: fn '%s' empty\n",fn_name);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);free(ptypes);return false;}
+        Stmt**body;size_t bc;if(!parse_block(lines,bs,be,4,&body,&bc)){fprintf(stderr,"Error in '%s': %s\n",fn_name,g_err);free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);free(ptypes);return false;}
+        if(prog->nfns==prog->cap){size_t nc=prog->cap?prog->cap*2:4;FnDef*np=realloc(prog->fns,nc*sizeof(FnDef));if(!np){free(fn_name);for(size_t j=0;j<pc;j++)free(params[j]);free(params);free(ptypes);for(size_t j=0;j<bc;j++)free_stmt(body[j]);free(body);return false;}prog->fns=np;prog->cap=nc;}
+        FnDef*fn=&prog->fns[prog->nfns++];fn->name=fn_name;fn->params=params;fn->nparams=pc;fn->param_types=ptypes;fn->return_type=type_int();fn->body=body;fn->nbody=bc;
         i=be;
     }
     return true;
 }
 
-static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog);
+static Type type_check_expr(Expr*e,Scope*sc,Program*prog);
+static size_t g_type_line=0;
+static void type_errorf(const char*fmt,...){
+    char msg[384];va_list ap;va_start(ap,fmt);vsnprintf(msg,sizeof(msg),fmt,ap);va_end(ap);
+    ERR("line %zu: %s",g_type_line,msg);
+}
+#define TERR(...) type_errorf(__VA_ARGS__)
 static FnDef*find_fn(Program*prog,const char*name){for(size_t i=0;i<prog->nfns;i++)if(strcmp(prog->fns[i].name,name)==0)return&prog->fns[i];return NULL;}
-static TypeKind type_check_expr(Expr*e,Scope*sc,Program*prog){
-    if(!e)return TYPE_VOID;
+static Type type_check_expr(Expr*e,Scope*sc,Program*prog){
+    if(!e)return type_void();
     switch(e->kind){
-    case EK_INT:e->type=TYPE_INT;return TYPE_INT;
-    case EK_BOOL:e->type=TYPE_BOOL;return TYPE_BOOL;
-    case EK_STRING:e->type=TYPE_STRING;return TYPE_STRING;
-    case EK_PTR_NULL:e->type=TYPE_PTR;return TYPE_PTR;
-    case EK_VAR:{Symbol*sym=scope_find(sc,e->name);if(!sym){ERR("undefined '%s'",e->name);return TYPE_UNKNOWN;}e->type=sym->type;return sym->type;}
-    case EK_INT_CAST:{if(e->argc!=1)return TYPE_UNKNOWN;TypeKind at=type_check_expr(e->args[0],sc,prog);if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;e->type=TYPE_INT;return TYPE_INT;}
-    case EK_PTR_CAST:{if(e->argc!=1)return TYPE_UNKNOWN;TypeKind at=type_check_expr(e->args[0],sc,prog);if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(at!=TYPE_INT){ERR("ptr() requires int");return TYPE_UNKNOWN;}e->type=TYPE_PTR;return TYPE_PTR;}
-    case EK_ALLOC:{if(e->argc!=1)return TYPE_UNKNOWN;TypeKind at=type_check_expr(e->args[0],sc,prog);if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(at!=TYPE_INT){ERR("alloc() requires int");return TYPE_UNKNOWN;}e->type=TYPE_PTR;return TYPE_PTR;}
-    case EK_FREE:{if(e->argc!=1)return TYPE_UNKNOWN;TypeKind at=type_check_expr(e->args[0],sc,prog);if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(at!=TYPE_PTR){ERR("free() requires pointer");return TYPE_UNKNOWN;}e->type=TYPE_VOID;return TYPE_VOID;}
-    case EK_DEREF:{TypeKind it=type_check_expr(e->left,sc,prog);if(it==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(it!=TYPE_PTR){ERR("cannot dereference non-pointer");return TYPE_UNKNOWN;}e->type=TYPE_INT;return TYPE_INT;}
-    case EK_ADDROF:{TypeKind it=type_check_expr(e->left,sc,prog);if(it==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(e->left->kind!=EK_VAR){ERR("address-of requires variable");return TYPE_UNKNOWN;}e->type=TYPE_PTR;return TYPE_PTR;}
-    case EK_CALL:{FnDef*fn=find_fn(prog,e->fn);if(!fn){ERR("undefined function '%s'",e->fn);return TYPE_UNKNOWN;}if(fn->nparams!=e->argc){ERR("wrong arg count");return TYPE_UNKNOWN;}for(size_t i=0;i<e->argc;i++){TypeKind at=type_check_expr(e->args[i],sc,prog);if(at==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(at!=fn->param_types[i]&&!(at==TYPE_BOOL&&fn->param_types[i]==TYPE_INT)){ERR("arg type mismatch");return TYPE_UNKNOWN;}}e->type=fn->return_type;return fn->return_type;}
-    case EK_BINOP:{TypeKind lt=type_check_expr(e->left,sc,prog);TypeKind rt=type_check_expr(e->right,sc,prog);if(lt==TYPE_UNKNOWN||rt==TYPE_UNKNOWN)return TYPE_UNKNOWN;const char*op=e->op;
-        if(strcmp(op,"+")==0||strcmp(op,"-")==0||strcmp(op,"*")==0||strcmp(op,"/")==0){if(lt!=TYPE_INT||rt!=TYPE_INT){ERR("operator requires int");return TYPE_UNKNOWN;}e->type=TYPE_INT;return TYPE_INT;}
-        if(strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0){if(lt!=TYPE_INT||rt!=TYPE_INT){ERR("comparison requires int");return TYPE_UNKNOWN;}e->type=TYPE_BOOL;return TYPE_BOOL;}
-        if(strcmp(op,"==")==0||strcmp(op,"!=")==0){if(lt!=rt&&!(lt==TYPE_BOOL&&rt==TYPE_INT)&&!(lt==TYPE_INT&&rt==TYPE_BOOL)){ERR("type mismatch");return TYPE_UNKNOWN;}e->type=TYPE_BOOL;return TYPE_BOOL;}
-        ERR("unknown operator");return TYPE_UNKNOWN;}
-    case EK_RANGE:{
-        TypeKind st=type_check_expr(e->range_start,sc,prog);if(st==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(st!=TYPE_INT){ERR("range start must be int");return TYPE_UNKNOWN;}
-        TypeKind et=type_check_expr(e->range_end,sc,prog);if(et==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(et!=TYPE_INT){ERR("range end must be int");return TYPE_UNKNOWN;}
-        if(e->range_step){TypeKind pt=type_check_expr(e->range_step,sc,prog);if(pt==TYPE_UNKNOWN)return TYPE_UNKNOWN;if(pt!=TYPE_INT){ERR("range step must be int");return TYPE_UNKNOWN;}if(e->range_step->kind==EK_INT&&e->range_step->ival==0){ERR("range step cannot be zero");return TYPE_UNKNOWN;}}
-        e->type=TYPE_INT;return TYPE_INT;}
-    default:ERR("unknown expression");return TYPE_UNKNOWN;
+    case EK_INT:e->type=type_int();return e->type;
+    case EK_BOOL:e->type=type_bool();return e->type;
+    case EK_STRING:e->type=type_string();return e->type;
+    case EK_PTR_NULL:e->type=type_null_ptr();return e->type;
+    case EK_VAR:{Symbol*sym=scope_find(sc,e->name);if(!sym){TERR("TypeError: undefined '%s'",e->name);return type_unknown();}e->type=sym->type;return e->type;}
+    case EK_INT_CAST:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(type_is_ptr(at)||type_eq(at,type_int())||type_eq(at,type_bool())){e->type=type_int();return e->type;}TERR("TypeError: int() cannot cast %s",type_name(at));return type_unknown();}
+    case EK_PTR_CAST:{if(e->argc!=1)return type_unknown();if(!type_is_ptr(e->cast_type)){TERR("TypeError: cast target must be pointer type");return type_unknown();}Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!(type_eq(at,type_int())||type_is_ptr(at))){TERR("TypeError: cannot cast %s to %s",type_name(at),type_name(e->cast_type));return type_unknown();}e->type=e->cast_type;return e->type;}
+    case EK_ALLOC:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_eq(at,type_int())){TERR("TypeError: alloc() requires int, got %s",type_name(at));return type_unknown();}e->type=type_null_ptr();return e->type;}
+    case EK_FREE:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_is_ptr(at)){TERR("TypeError: free() requires pointer, got %s",type_name(at));return type_unknown();}e->type=type_void();return e->type;}
+    case EK_DEREF:{Type it=type_check_expr(e->left,sc,prog);if(type_is_unknown(it))return type_unknown();if(!type_is_ptr(it)){TERR("TypeError: cannot dereference %s",type_name(it));return type_unknown();}Type dt=type_deref(it);if(dt.ptr_depth==0&&dt.base==BASE_VOID)dt=type_int();e->type=dt;return e->type;}
+    case EK_ADDROF:{Type it=type_check_expr(e->left,sc,prog);if(type_is_unknown(it))return type_unknown();if(e->left->kind!=EK_VAR){TERR("TypeError: address-of requires variable");return type_unknown();}e->type=type_addr_of(it);return e->type;}
+    case EK_CALL:{FnDef*fn=find_fn(prog,e->fn);if(!fn){TERR("TypeError: undefined function '%s'",e->fn);return type_unknown();}if(fn->nparams!=e->argc){TERR("TypeError: function '%s' expects %zu args, got %zu",e->fn,fn->nparams,e->argc);return type_unknown();}for(size_t i=0;i<e->argc;i++){Type at=type_check_expr(e->args[i],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_assignable(fn->param_types[i],at)){TERR("TypeError: arg %zu of '%s' expects %s, got %s",i+1,e->fn,type_name(fn->param_types[i]),type_name(at));return type_unknown();}}e->type=fn->return_type;return e->type;}
+    case EK_BINOP:{Type lt=type_check_expr(e->left,sc,prog);Type rt=type_check_expr(e->right,sc,prog);if(type_is_unknown(lt)||type_is_unknown(rt))return type_unknown();const char*op=e->op;
+        if(strcmp(op,"+")==0){if(type_eq(lt,type_int())&&type_eq(rt,type_int())){e->type=type_int();return e->type;}if(type_eq(lt,type_string())&&type_eq(rt,type_string())){e->type=type_string();return e->type;}if(type_is_ptr(lt)&&type_eq(rt,type_int())){e->type=lt;return e->type;}TERR("TypeError: invalid operation %s + %s",type_name(lt),type_name(rt));return type_unknown();}
+        if(strcmp(op,"-")==0){if(type_eq(lt,type_int())&&type_eq(rt,type_int())){e->type=type_int();return e->type;}if(type_is_ptr(lt)&&type_eq(rt,type_int())){e->type=lt;return e->type;}TERR("TypeError: invalid operation %s - %s",type_name(lt),type_name(rt));return type_unknown();}
+        if(strcmp(op,"*")==0||strcmp(op,"/")==0){if(!(type_eq(lt,type_int())&&type_eq(rt,type_int()))){TERR("TypeError: invalid operation %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_int();return e->type;}
+        if(strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0){if(!(type_eq(lt,type_int())&&type_eq(rt,type_int()))){TERR("TypeError: invalid comparison %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_bool();return e->type;}
+        if(strcmp(op,"==")==0||strcmp(op,"!=")==0){if(!(type_eq(lt,rt)||(type_is_ptr(lt)&&type_eq(rt,type_null_ptr()))||(type_is_ptr(rt)&&type_eq(lt,type_null_ptr())))){TERR("TypeError: invalid comparison %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_bool();return e->type;}
+        TERR("TypeError: unknown operator '%s'",op);return type_unknown();}
+    case EK_RANGE:{Type st=type_check_expr(e->range_start,sc,prog);if(type_is_unknown(st))return type_unknown();if(!type_eq(st,type_int())){TERR("TypeError: range start must be int, got %s",type_name(st));return type_unknown();}Type et=type_check_expr(e->range_end,sc,prog);if(type_is_unknown(et))return type_unknown();if(!type_eq(et,type_int())){TERR("TypeError: range end must be int, got %s",type_name(et));return type_unknown();}if(e->range_step){Type pt=type_check_expr(e->range_step,sc,prog);if(type_is_unknown(pt))return type_unknown();if(!type_eq(pt,type_int())){TERR("TypeError: range step must be int, got %s",type_name(pt));return type_unknown();}if(e->range_step->kind==EK_INT&&e->range_step->ival==0){TERR("TypeError: range step cannot be zero");return type_unknown();}}e->type=type_int();return e->type;}
+    default:TERR("TypeError: unknown expression");return type_unknown();
     }
 }
 static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop);
 static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop){
+    g_type_line=s?s->line:0;
     switch(s->kind){
-    case SK_PRINT:{TypeKind t=type_check_expr(s->expr,sc,prog);if(t==TYPE_UNKNOWN)return false;if(t!=TYPE_INT&&t!=TYPE_BOOL&&t!=TYPE_STRING){ERR("print supports int,bool,string");return false;}return true;}
-    case SK_ASSIGN:{if(!s->var){TypeKind tt=type_check_expr(s->cond,sc,prog);if(tt==TYPE_UNKNOWN)return false;if(s->cond->kind!=EK_DEREF){ERR("left side must be deref");return false;}TypeKind vt=type_check_expr(s->expr,sc,prog);if(vt==TYPE_UNKNOWN)return false;if(vt!=TYPE_INT){ERR("can only assign int to deref");return false;}return true;}
-        Symbol*sym=scope_find(sc,s->var);if(!sym){TypeKind t=type_check_expr(s->expr,sc,prog);if(t==TYPE_UNKNOWN)return false;if(!scope_add(sc,s->var,t,0))return false;s->var_type=t;}else{TypeKind t=type_check_expr(s->expr,sc,prog);if(t==TYPE_UNKNOWN)return false;if(t!=sym->type&&!(t==TYPE_BOOL&&sym->type==TYPE_INT)){ERR("type mismatch");return false;}s->var_type=sym->type;}return true;}
-    case SK_IF:{TypeKind ct=type_check_expr(s->cond,sc,prog);if(ct==TYPE_UNKNOWN)return false;if(ct!=TYPE_INT&&ct!=TYPE_BOOL){ERR("condition must be int or bool");return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop)){scope_free(&inner);return false;}scope_free(&inner);if(s->nels>0){Scope e_scope;scope_init(&e_scope,sc);if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop)){scope_free(&e_scope);return false;}scope_free(&e_scope);}return true;}
-    case SK_WHILE:{TypeKind ct=type_check_expr(s->cond,sc,prog);if(ct==TYPE_UNKNOWN)return false;if(ct!=TYPE_INT&&ct!=TYPE_BOOL){ERR("condition must be int or bool");return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
-    case SK_FOR:{TypeKind rt=type_check_expr(s->range_expr,sc,prog);if(rt==TYPE_UNKNOWN)return false;if(rt!=TYPE_INT){ERR("range must be int");return false;}Scope inner;scope_init(&inner,sc);if(!scope_add(&inner,s->loop_var,TYPE_INT,0)){scope_free(&inner);return false;}if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
-    case SK_RETURN:{if(s->expr){TypeKind t=type_check_expr(s->expr,sc,prog);if(t==TYPE_UNKNOWN)return false;}return true;}
-    case SK_BREAK:case SK_CONTINUE:if(!in_loop){ERR("break/continue outside loop");return false;}return true;
-    case SK_CALL:{TypeKind t=type_check_expr(s->expr,sc,prog);return t!=TYPE_UNKNOWN;}
+    case SK_PRINT:{Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;if(!(type_eq(t,type_int())||type_eq(t,type_bool())||type_eq(t,type_string()))){TERR("TypeError: print supports int, bool, str");return false;}return true;}
+    case SK_DECL:{if(scope_find(sc,s->var)){TERR("TypeError: variable '%s' already declared",s->var);return false;}return scope_add(sc,s->var,s->var_type,0);} 
+    case SK_ASSIGN:{if(!s->var){Type tt=type_check_expr(s->cond,sc,prog);if(type_is_unknown(tt))return false;if(s->cond->kind!=EK_DEREF){TERR("TypeError: left side must be pointer dereference");return false;}Type vt=type_check_expr(s->expr,sc,prog);if(type_is_unknown(vt))return false;if(!type_assignable(tt,vt)){TERR("TypeError: cannot assign %s to %s",type_name(vt),type_name(tt));return false;}return true;}
+        Symbol*sym=scope_find(sc,s->var);if(!sym){Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;Type final_t=t;if(!type_is_unknown(s->var_type)){if(!type_assignable(s->var_type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(s->var_type));return false;}final_t=s->var_type;}if(!scope_add(sc,s->var,final_t,0))return false;s->var_type=final_t;}else{Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;if(!type_assignable(sym->type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(sym->type));return false;}s->var_type=sym->type;}return true;}
+    case SK_IF:{Type ct=type_check_expr(s->cond,sc,prog);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop)){scope_free(&inner);return false;}scope_free(&inner);if(s->nels>0){Scope e_scope;scope_init(&e_scope,sc);if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop)){scope_free(&e_scope);return false;}scope_free(&e_scope);}return true;}
+    case SK_WHILE:{Type ct=type_check_expr(s->cond,sc,prog);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_FOR:{Type rt=type_check_expr(s->range_expr,sc,prog);if(type_is_unknown(rt))return false;if(!type_eq(rt,type_int())){TERR("TypeError: range expression must be int, got %s",type_name(rt));return false;}Scope inner;scope_init(&inner,sc);if(!scope_add(&inner,s->loop_var,type_int(),0)){scope_free(&inner);return false;}if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_RETURN:{if(s->expr){Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;}return true;}
+    case SK_BREAK:case SK_CONTINUE:if(!in_loop){TERR("TypeError: break/continue outside loop");return false;}return true;
+    case SK_CALL:{Type t=type_check_expr(s->expr,sc,prog);return!type_is_unknown(t);}
     default:return true;
     }
 }
 static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop){for(size_t i=0;i<count;i++)if(!type_check_stmt(stmts[i],sc,prog,in_loop))return false;return true;}
-static bool type_check_fn(FnDef*fn,Program*prog){Scope sc;scope_init(&sc,NULL);for(size_t i=0;i<fn->nparams;i++){fn->param_types[i]=TYPE_INT;if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}}if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false)){scope_free(&sc);return false;}scope_free(&sc);return true;}
+static bool type_check_fn(FnDef*fn,Program*prog){Scope sc;scope_init(&sc,NULL);for(size_t i=0;i<fn->nparams;i++){if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}}if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false)){scope_free(&sc);return false;}scope_free(&sc);return true;}
 static bool type_check_program(Program*prog){for(size_t i=0;i<prog->nfns;i++)if(!type_check_fn(&prog->fns[i],prog)){fprintf(stderr,"TypeError in '%s': %s\n",prog->fns[i].name,g_err);return false;}return true;}
 
 typedef struct{SBuf out;size_t lbl;}CG;
@@ -357,82 +434,124 @@ static void cg_init(CG*g){sb_init(&g->out);g->lbl=0;}
 static void cg_free(CG*g){sb_free(&g->out);}
 static size_t L(CG*g){return g->lbl++;}
 static void E(CG*g,const char*fmt,...){char tmp[1024];va_list ap;va_start(ap,fmt);vsnprintf(tmp,sizeof(tmp),fmt,ap);va_end(ap);sb_cat(&g->out,tmp);}
-static const char*cg_type(TypeKind t){switch(t){case TYPE_INT:return"long long";case TYPE_PTR:return"void*";case TYPE_BOOL:return"int";case TYPE_STRING:return"const char*";case TYPE_VOID:return"void";default:return"long long";}}
+static const char*cg_type(Type t){
+    static char bufs[8][96];static int bi=0;char base[64];
+    if(t.ptr_depth==0){
+        if(t.base==BASE_INT)return"long long";
+        if(t.base==BASE_BOOL)return"int";
+        if(t.base==BASE_STRING)return"const char*";
+        if(t.base==BASE_VOID)return"void";
+        return"long long";
+    }
+    if(t.base==BASE_INT)snprintf(base,sizeof(base),"long long");
+    else if(t.base==BASE_BOOL)snprintf(base,sizeof(base),"int");
+    else if(t.base==BASE_STRING)snprintf(base,sizeof(base),"const char*");
+    else snprintf(base,sizeof(base),"void");
+    bi=(bi+1)%8;snprintf(bufs[bi],sizeof(bufs[bi]),"%s",base);
+    for(unsigned i=0;i<t.ptr_depth;i++)strncat(bufs[bi],"*",sizeof(bufs[bi])-strlen(bufs[bi])-1);
+    return bufs[bi];
+}
 static char*escape_for_c(const char*s){
     size_t len=strlen(s);char*result=malloc(len*4+1);if(!result)return NULL;size_t j=0;
     for(size_t i=0;i<len;i++){unsigned char c=(unsigned char)s[i];
         switch(c){case'\n':result[j++]='\\';result[j++]='n';break;case'\t':result[j++]='\\';result[j++]='t';break;case'\r':result[j++]='\\';result[j++]='r';break;case'\\':result[j++]='\\';result[j++]='\\';break;case'"':result[j++]='\\';result[j++]='"';break;default:if(c>=32&&c<127)result[j++]=c;else j+=sprintf(result+j,"\\x%02x",c);break;}}
     result[j]='\0';return result;
 }
-static bool cg_expr_val(CG*g,Expr*e,SBuf*result);
-static bool cg_stmts(CG*g,Stmt**s,size_t n,bool inlp);
-static bool cg_expr_val(CG*g,Expr*e,SBuf*result){
+static bool cg_expr_val(CG*g,Expr*e,SBuf*result,bool no_runtime);
+static bool cg_stmts(CG*g,Stmt**s,size_t n,bool inlp,bool no_runtime);
+static bool cg_expr_val(CG*g,Expr*e,SBuf*result,bool no_runtime){
     switch(e->kind){
     case EK_INT:sb_fmt(result,"%lld",e->ival);return true;
     case EK_BOOL:sb_cat(result,e->ival?"1":"0");return true;
     case EK_STRING:{char*esc=escape_for_c(e->sval);if(!esc)return false;sb_fmt(result,"\"%s\"",esc);free(esc);return true;}
-    case EK_PTR_NULL:sb_cat(result,"NULL");return true;
+    case EK_PTR_NULL:sb_cat(result,"((void*)0)");return true;
     case EK_VAR:sb_cat(result,e->name);return true;
-    case EK_INT_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a)){sb_free(&a);return false;}sb_fmt(result,"((long long)(%s))",a.d);sb_free(&a);return true;}
-    case EK_PTR_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a)){sb_free(&a);return false;}sb_fmt(result,"((void*)(size_t)(%s))",a.d);sb_free(&a);return true;}
-    case EK_ALLOC:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a)){sb_free(&a);return false;}sb_fmt(result,"malloc((size_t)(%s))",a.d);sb_free(&a);return true;}
-    case EK_FREE:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a)){sb_free(&a);return false;}sb_fmt(result,"(free(%s),(void*)0)",a.d);sb_free(&a);return true;}
-    case EK_DEREF:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a)){sb_free(&a);return false;}sb_fmt(result,"(*((long long*)(%s)))",a.d);sb_free(&a);return true;}
-    case EK_ADDROF:{if(e->left->kind==EK_VAR){sb_fmt(result,"((void*)&%s)",e->left->name);}else return false;return true;}
-    case EK_CALL:{SBuf*args=malloc(e->argc*sizeof(SBuf));for(size_t i=0;i<e->argc;i++){sb_init(&args[i]);if(!cg_expr_val(g,e->args[i],&args[i])){for(size_t j=0;j<=i;j++)sb_free(&args[j]);free(args);return false;}}sb_fmt(result,"_fn_%s(",e->fn);for(size_t i=0;i<e->argc;i++){if(i)sb_cat(result,", ");sb_cat(result,args[i].d);sb_free(&args[i]);}sb_cat(result,")");free(args);return true;}
-    case EK_BINOP:{SBuf l,r;sb_init(&l);sb_init(&r);if(!cg_expr_val(g,e->left,&l)||!cg_expr_val(g,e->right,&r)){sb_free(&l);sb_free(&r);return false;}const char*op=e->op;if(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0)sb_fmt(result,"(%s %s %s ? 1 : 0)",l.d,op,r.d);else sb_fmt(result,"(%s %s %s)",l.d,op,r.d);sb_free(&l);sb_free(&r);return true;}
+    case EK_INT_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((long long)(%s))",a.d);sb_free(&a);return true;}
+    case EK_PTR_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((%s)(unsigned long long)(%s))",cg_type(e->cast_type),a.d);sb_free(&a);return true;}
+    case EK_ALLOC:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"aut_alloc((unsigned long long)(%s))",a.d);else sb_fmt(result,"malloc((size_t)(%s))",a.d);sb_free(&a);return true;}
+    case EK_FREE:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"(aut_free(%s),(void*)0)",a.d);else sb_fmt(result,"(free(%s),(void*)0)",a.d);sb_free(&a);return true;}
+    case EK_DEREF:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"(*((%s*)(%s)))",cg_type(e->type),a.d);sb_free(&a);return true;}
+    case EK_ADDROF:{if(e->left->kind==EK_VAR){sb_fmt(result,"((%s)(&%s))",cg_type(e->type),e->left->name);}else return false;return true;}
+    case EK_CALL:{SBuf*args=malloc(e->argc*sizeof(SBuf));for(size_t i=0;i<e->argc;i++){sb_init(&args[i]);if(!cg_expr_val(g,e->args[i],&args[i],no_runtime)){for(size_t j=0;j<=i;j++)sb_free(&args[j]);free(args);return false;}}sb_fmt(result,"_fn_%s(",e->fn);for(size_t i=0;i<e->argc;i++){if(i)sb_cat(result,", ");sb_cat(result,args[i].d);sb_free(&args[i]);}sb_cat(result,")");free(args);return true;}
+    case EK_BINOP:{
+        const char*op=e->op;
+        if(strcmp(op,"+")==0&&type_eq(e->type,type_string())){
+            if(e->left->kind!=EK_STRING||e->right->kind!=EK_STRING){ERR("str + str is supported only for string literals");return false;}
+            size_t ln=strlen(e->left->sval),rn=strlen(e->right->sval);char*joined=malloc(ln+rn+1);if(!joined)return false;
+            memcpy(joined,e->left->sval,ln);memcpy(joined+ln,e->right->sval,rn+1);
+            char*esc=escape_for_c(joined);free(joined);if(!esc)return false;sb_fmt(result,"\"%s\"",esc);free(esc);return true;
+        }
+        SBuf l,r;sb_init(&l);sb_init(&r);
+        if(!cg_expr_val(g,e->left,&l,no_runtime)||!cg_expr_val(g,e->right,&r,no_runtime)){sb_free(&l);sb_free(&r);return false;}
+        if(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0)sb_fmt(result,"(%s %s %s ? 1 : 0)",l.d,op,r.d);
+        else sb_fmt(result,"(%s %s %s)",l.d,op,r.d);
+        sb_free(&l);sb_free(&r);return true;
+    }
     case EK_RANGE:ERR("range outside for");return false;
     default:return false;
     }
 }
-static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp){
+static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp,bool no_runtime){
     for(size_t i=0;i<count;i++){Stmt*s=stmts[i];
         switch(s->kind){
-        case SK_PRINT:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e)){sb_free(&e);return false;}if(s->expr->type==TYPE_BOOL)E(g,"    printf(\"%%s\\n\",%s?\"true\":\"false\");\n",e.d);else if(s->expr->type==TYPE_STRING)E(g,"    printf(\"%%s\\n\",%s);\n",e.d);else E(g,"    printf(\"%%lld\\n\",(long long)(%s));\n",e.d);sb_free(&e);break;}
-        case SK_ASSIGN:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e)){sb_free(&e);return false;}if(!s->var){SBuf inner;sb_init(&inner);if(s->cond&&s->cond->kind==EK_DEREF&&s->cond->left){if(!cg_expr_val(g,s->cond->left,&inner)){sb_free(&inner);sb_free(&e);return false;}E(g,"    (*((long long*)(%s)) = %s);\n",inner.d,e.d);}sb_free(&inner);}else E(g,"    %s = %s;\n",s->var,e.d);sb_free(&e);break;}
-        case SK_IF:{SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c)){sb_free(&c);return false;}E(g,"    if(%s) {\n",c.d);sb_free(&c);if(!cg_stmts(g,s->then,s->nthen,inlp))return false;if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,inlp))return false;}E(g,"    }\n");break;}
-        case SK_WHILE:{E(g,"    while(1) {\n");SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c)){sb_free(&c);return false;}E(g,"        if(!(%s)) break;\n",c.d);sb_free(&c);if(!cg_stmts(g,s->loop,s->nloop,true))return false;E(g,"    }\n");break;}
-        case SK_FOR:{size_t lf=L(g);Expr*r=s->range_expr;SBuf st,ed,sp;sb_init(&st);sb_init(&ed);sb_init(&sp);if(!cg_expr_val(g,r->range_start,&st)||!cg_expr_val(g,r->range_end,&ed)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}if(r->range_step&&!cg_expr_val(g,r->range_step,&sp)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}E(g,"    {\n");E(g,"        long long _s%zu = %s, _e%zu = %s;\n",lf,st.d,lf,ed.d);if(r->range_step)E(g,"        long long _p%zu = %s;\n",lf,sp.d);else E(g,"        long long _p%zu = (_s%zu <= _e%zu) ? 1 : -1;\n",lf,lf,lf);sb_free(&st);sb_free(&ed);sb_free(&sp);E(g,"        for(%s = _s%zu; ",s->loop_var,lf);if(r->range_inclusive)E(g,"(_p%zu > 0) ? (%s <= _e%zu) : (%s >= _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);else E(g,"(_p%zu > 0) ? (%s < _e%zu) : (%s > _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);E(g,"%s += _p%zu) {\n",s->loop_var,lf);if(!cg_stmts(g,s->loop,s->nloop,true))return false;E(g,"        }\n");E(g,"    }\n");break;}
-        case SK_RETURN:{if(s->expr){SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e)){sb_free(&e);return false;}E(g,"    return %s;\n",e.d);sb_free(&e);}else E(g,"    return 0;\n");break;}
+        case SK_PRINT:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}if(no_runtime){if(type_eq(s->expr->type,type_bool()))E(g,"    aut_print_str(%s?\"true\":\"false\");\n",e.d);else if(type_eq(s->expr->type,type_string()))E(g,"    aut_print_str(%s);\n",e.d);else E(g,"    aut_print_i64((long long)(%s));\n",e.d);}else{if(type_eq(s->expr->type,type_bool()))E(g,"    printf(\"%%s\\n\",%s?\"true\":\"false\");\n",e.d);else if(type_eq(s->expr->type,type_string()))E(g,"    printf(\"%%s\\n\",%s);\n",e.d);else E(g,"    printf(\"%%lld\\n\",(long long)(%s));\n",e.d);}sb_free(&e);break;}
+        case SK_DECL:break;
+        case SK_ASSIGN:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}if(!s->var){SBuf inner;sb_init(&inner);if(s->cond&&s->cond->kind==EK_DEREF&&s->cond->left){if(!cg_expr_val(g,s->cond->left,&inner,no_runtime)){sb_free(&inner);sb_free(&e);return false;}E(g,"    (*((%s*)(%s)) = %s);\n",cg_type(s->cond->type),inner.d,e.d);}sb_free(&inner);}else E(g,"    %s = %s;\n",s->var,e.d);sb_free(&e);break;}
+        case SK_IF:{SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"    if(%s) {\n",c.d);sb_free(&c);if(!cg_stmts(g,s->then,s->nthen,inlp,no_runtime))return false;if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,inlp,no_runtime))return false;}E(g,"    }\n");break;}
+        case SK_WHILE:{E(g,"    while(1) {\n");SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"        if(!(%s)) break;\n",c.d);sb_free(&c);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"    }\n");break;}
+        case SK_FOR:{size_t lf=L(g);Expr*r=s->range_expr;SBuf st,ed,sp;sb_init(&st);sb_init(&ed);sb_init(&sp);if(!cg_expr_val(g,r->range_start,&st,no_runtime)||!cg_expr_val(g,r->range_end,&ed,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}if(r->range_step&&!cg_expr_val(g,r->range_step,&sp,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}E(g,"    {\n");E(g,"        long long _s%zu = %s, _e%zu = %s;\n",lf,st.d,lf,ed.d);if(r->range_step)E(g,"        long long _p%zu = %s;\n",lf,sp.d);else E(g,"        long long _p%zu = (_s%zu <= _e%zu) ? 1 : -1;\n",lf,lf,lf);sb_free(&st);sb_free(&ed);sb_free(&sp);E(g,"        for(%s = _s%zu; ",s->loop_var,lf);if(r->range_inclusive)E(g,"(_p%zu > 0) ? (%s <= _e%zu) : (%s >= _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);else E(g,"(_p%zu > 0) ? (%s < _e%zu) : (%s > _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);E(g,"%s += _p%zu) {\n",s->loop_var,lf);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"        }\n");E(g,"    }\n");break;}
+        case SK_RETURN:{if(s->expr){SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    return %s;\n",e.d);sb_free(&e);}else E(g,"    return 0;\n");break;}
         case SK_BREAK:E(g,"    break;\n");break;
         case SK_CONTINUE:E(g,"    continue;\n");break;
-        case SK_CALL:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e)){sb_free(&e);return false;}E(g,"    (void)%s;\n",e.d);sb_free(&e);break;}
+        case SK_CALL:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    (void)%s;\n",e.d);sb_free(&e);break;}
         default:break;
         }
     }
     return true;
 }
-typedef struct{char*name;TypeKind type;}VarInfo;
+typedef struct{char*name;Type type;}VarInfo;
 static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size_t*cap,FnDef*fn){
     for(size_t i=0;i<nbody;i++){Stmt*s=body[i];
-        if(s->kind==SK_ASSIGN&&s->var){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->var);(*vars)[*count].type=s->var_type?s->var_type:TYPE_INT;(*count)++;}}
+        if((s->kind==SK_ASSIGN||s->kind==SK_DECL)&&s->var){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->var);(*vars)[*count].type=type_is_unknown(s->var_type)?type_int():s->var_type;(*count)++;}}
         if(s->kind==SK_IF){if(!collect_vars(s->then,s->nthen,vars,count,cap,fn))return false;if(!collect_vars(s->els,s->nels,vars,count,cap,fn))return false;}
         if(s->kind==SK_WHILE){if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
-        if(s->kind==SK_FOR){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->loop_var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->loop_var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->loop_var);(*vars)[*count].type=TYPE_INT;(*count)++;}if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
+        if(s->kind==SK_FOR){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->loop_var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->loop_var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->loop_var);(*vars)[*count].type=type_int();(*count)++;}if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
     }
     return true;
 }
-static bool cg_fn(CG*g,FnDef*fn,const Program*prog){
+static bool cg_fn(CG*g,FnDef*fn,const Program*prog,bool no_runtime){
     (void)prog;E(g,"static %s _fn_%s(",cg_type(fn->return_type),fn->name);
     for(size_t i=0;i<fn->nparams;i++){if(i)E(g,", ");E(g,"%s %s",cg_type(fn->param_types[i]),fn->params[i]);}
     E(g,") {\n");VarInfo*vars=NULL;size_t vcount=0,vcap=0;
     if(!collect_vars(fn->body,fn->nbody,&vars,&vcount,&vcap,fn)){free(vars);return false;}
     for(size_t i=0;i<vcount;i++){E(g,"    %s %s = 0;\n",cg_type(vars[i].type),vars[i].name);free(vars[i].name);}
-    free(vars);if(!cg_stmts(g,fn->body,fn->nbody,false))return false;E(g,"    return 0;\n");E(g,"}\n\n");return true;
+    free(vars);if(!cg_stmts(g,fn->body,fn->nbody,false,no_runtime))return false;E(g,"    return 0;\n");E(g,"}\n\n");return true;
 }
-static bool codegen(const Program*prog,const char*out_path){
-    CG g;cg_init(&g);E(&g,"/* AutismLang v%s */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n",AUTISMLANG_VERSION);
+static bool codegen(const Program*prog,const char*out_path,bool no_runtime){
+    CG g;cg_init(&g);E(&g,"/* AutismLang v%s */\n",AUTISMLANG_VERSION);
+    if(no_runtime){
+        E(&g,"typedef unsigned long long aut_u64;\n");
+        E(&g,"extern void aut_print_i64(long long value);\n");
+        E(&g,"extern void aut_print_str(const char* value);\n");
+        E(&g,"extern void* aut_alloc(aut_u64 size);\n");
+        E(&g,"extern void aut_free(void* ptr);\n\n");
+    }else{
+        E(&g,"#include <stdio.h>\n#include <stdlib.h>\n\n");
+    }
     for(size_t i=0;i<prog->nfns;i++){E(&g,"static %s _fn_%s(",cg_type(prog->fns[i].return_type),prog->fns[i].name);for(size_t j=0;j<prog->fns[i].nparams;j++){if(j)E(&g,", ");E(&g,"%s",cg_type(prog->fns[i].param_types[j]));}E(&g,");\n");}E(&g,"\n");
-    for(size_t i=0;i<prog->nfns;i++){if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog)){cg_free(&g);return false;}}
-    E(&g,"int main(void) { _fn_main(); return 0; }\n");
+    for(size_t i=0;i<prog->nfns;i++){if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog,no_runtime)){cg_free(&g);return false;}}
+    if(no_runtime)E(&g,"void aut_entry(void) { (void)_fn_main(); }\n");
+    else E(&g,"int main(void) { _fn_main(); return 0; }\n");
     char*pc=xdup(out_path);for(size_t i=0;pc[i];i++){if(pc[i]=='/'||pc[i]=='\\'){char sv=pc[i];pc[i]=0;if(pc[0])MKDIR(pc);pc[i]=sv;}}free(pc);
     FILE*fp=fopen(out_path,"wb");if(!fp){cg_free(&g);return false;}fwrite(g.out.d,1,g.out.len,fp);fclose(fp);cg_free(&g);return true;
 }
 int main(int argc,char**argv){
     const char*in=NULL,*out="build/out.c";
+    bool no_runtime=false;
     for(int i=1;i<argc;i++){
-        if(strcmp(argv[i],"--help")==0){printf("Usage: %s <input.aut> [-o output.c]\n",argv[0]);return 0;}
+        if(strcmp(argv[i],"--help")==0){printf("Usage: %s <input.aut> [-o output.c] [--no-runtime]\n",argv[0]);return 0;}
         else if(strcmp(argv[i],"--version")==0){printf("AutismLang %s\n",AUTISMLANG_VERSION);return 0;}
+        else if(strcmp(argv[i],"--no-runtime")==0){no_runtime=true;}
         else if(strcmp(argv[i],"-o")==0){if(i+1>=argc)return 1;out=argv[++i];}
         else if(argv[i][0]=='-'){fprintf(stderr,"Unknown: %s\n",argv[i]);return 1;}
         else if(!in)in=argv[i];else{fprintf(stderr,"One file only\n");return 1;}
@@ -443,6 +562,6 @@ int main(int argc,char**argv){
     bool has_main=false;for(size_t i=0;i<prog.nfns;i++)if(strcmp(prog.fns[i].name,"main")==0){has_main=true;break;}
     if(!has_main){fprintf(stderr,"Error: missing fn main\n");free_program(&prog);sl_free(&lines);return 1;}
     if(!type_check_program(&prog)){free_program(&prog);sl_free(&lines);return 1;}
-    if(!codegen(&prog,out)){free_program(&prog);sl_free(&lines);return 1;}
+    if(!codegen(&prog,out,no_runtime)){free_program(&prog);sl_free(&lines);return 1;}
     printf("Compiled %s -> %s\n",in,out);free_program(&prog);sl_free(&lines);return 0;
 }

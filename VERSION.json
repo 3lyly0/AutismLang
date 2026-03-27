@@ -1,11 +1,11 @@
 {
-    "version": "0.4.0",
+    "version": "0.5.0",
     "backend": "c-static",
     "changes": [
-        "Native range syntax: for i in 0..10 (exclusive)",
-        "Native range syntax: for i in 0..=10 (inclusive)",
-        "Native range syntax: for i in 0..10..2 (with step)",
-        "Native range syntax: for i in 10..0..-1 (reverse)",
-        "Auto-inferred step direction based on start/end values"
+        "Typed pointer system: ptr<T> declarations and pointer casts",
+        "Strict static typing for int, bool, str, and pointers",
+        "Compile-time TypeError diagnostics with line numbers",
+        "Kernel/freestanding output mode via --no-runtime",
+        "No-runtime entrypoint and external hook ABI for low-level targets"
     ]
 }

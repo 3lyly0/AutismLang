@@ -1,4 +1,4 @@
-# AutismLang Makefile v0.4.0 - C backend
+# AutismLang Makefile v0.5.0 - C backend
 CC     = gcc
 AUTISM = ./autism
 FILE   ?= examples/hello
@@ -6,8 +6,8 @@ NAME   = $(notdir $(FILE))
 SRC    = $(FILE).aut
 _C     = build/$(NAME).c
 _EXE   = build/$(NAME)
-TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native
-TEST_FAIL    = type_error_add comparison_type_error
+TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid
+TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign
 
 .PHONY: all run compiler test test-suite version clean
 

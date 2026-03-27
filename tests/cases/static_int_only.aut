@@ -1,5 +1,5 @@
 # Test static typing with int only
-fn add(a, b):
+fn add(int a, int b):
     return a + b
 
 fn main():

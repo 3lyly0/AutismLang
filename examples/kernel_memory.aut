@@ -1,0 +1,4 @@
+fn main():
+    vga = ptr<void>(0xB8000)
+    *vga = 65
+    print(*vga)

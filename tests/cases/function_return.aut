@@ -1,4 +1,4 @@
-fn double(x):
+fn double(int x):
     return x * 2
 
 fn main():
