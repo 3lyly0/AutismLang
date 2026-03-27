@@ -13,7 +13,7 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
-#define AUTISMLANG_VERSION "0.6.0"
+#define AUTISMLANG_VERSION "0.7.0"
 static char g_err[512];
 #define ERR(...) snprintf(g_err,sizeof(g_err),__VA_ARGS__)
 

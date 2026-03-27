@@ -1,4 +1,4 @@
-# AutismLang (v0.6.0)
+# AutismLang (v0.7.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.6.0)
+## Implemented Features (v0.7.0)
 
 - Function declaration with `fn name():`
 - Function parameters require explicit types: `fn add(int a, int b):`
@@ -38,9 +38,10 @@ fn main():
 - `for var in range:` loops with native range syntax
 - Function parameters and calls
 - Controlled raw pointer access via `unsafe:` blocks
-- Inline assembly: `asm("...")` (string literal only)
-- Port I/O primitives: `out(port, value)` and `in(port)`
+- Inline assembly: `asm("...")` (string literal only, requires unsafe block)
+- Port I/O primitives: `out(port, value)` and `in(port)` (x86/x86_64, requires unsafe block)
 - Volatile typed pointers: `volatile ptr<T> name`
+- Cross-platform architecture support: x86, x86_64, ARM64 (with fallback safety)
 - Command-line options: `--help`, `--version`, `--metadata`
 
 ## Native Range Syntax
@@ -235,7 +236,14 @@ Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
 
 ## Changelog
 
-### v0.6.0 (Current)
+### v0.7.0 (Current)
+- **Hardware interaction**: inline assembly `asm("...")`, port I/O `in(port)` / `out(port, value)`
+- **Volatile pointers**: `volatile ptr<T>` for memory-mapped I/O patterns
+- **Safety enforcement**: all hardware features require `unsafe:` block
+- **Cross-platform support**: x86/x86_64 with architecture-aware fallback for ARM64 and other architectures
+- **Portable codegen**: preprocessor guards for platform-specific inline assembly helpers
+
+### v0.6.0
 - **Unsafe block model**: explicit `unsafe:` block required for pointer dereference
 - **Compile-time UnsafeError**: dereference outside unsafe is rejected
 - **Strict raw-pointer rule**: `ptr<void>` cannot be dereferenced directly

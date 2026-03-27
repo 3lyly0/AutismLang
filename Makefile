@@ -1,4 +1,4 @@
-# AutismLang Makefile v0.6.0 - C backend
+# AutismLang Makefile v0.7.0 - C backend
 CC     = gcc
 AUTISM = ./autism
 FILE   ?= examples/hello

@@ -1,10 +1,11 @@
 {
-    "version": "0.6.0",
+    "version": "0.7.0",
     "backend": "c-static",
     "changes": [
+        "Direct hardware access: inline assembly (asm), port I/O (in/out), volatile pointers",
+        "Portable architecture support: x86/x86_64 with cross-platform fallback (ARM64 compatible)",
+        "Enhanced safety: all hardware features require unsafe blocks",
         "Unsafe block safety model for raw pointer dereference",
-        "Dereference outside unsafe is rejected with UnsafeError",
-        "ptr<void> dereference is forbidden and requires explicit typed cast",
         "Strict static typing for int, bool, str, and pointers",
         "Kernel/freestanding output mode via --no-runtime"
     ]
