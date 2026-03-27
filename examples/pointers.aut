@@ -1,13 +1,16 @@
 fn main():
     # Memory allocation
     ptr<void> x = alloc(8)
-    *x = 42
-    print(*x)
+    ptr<int> xi = ptr<int>(x)
+    unsafe:
+        *xi = 42
+        print(*xi)
     
     # Address-of operator
     int y = 100
     ptr<int> p = &y
-    print(*p)
+    unsafe:
+        print(*p)
     
     # Free memory
     free(x)

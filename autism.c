@@ -13,7 +13,7 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
-#define AUTISMLANG_VERSION "0.5.0"
+#define AUTISMLANG_VERSION "0.6.0"
 static char g_err[512];
 #define ERR(...) snprintf(g_err,sizeof(g_err),__VA_ARGS__)
 
@@ -128,7 +128,7 @@ typedef struct Expr{
     struct Expr*left,*right,**args;size_t argc;
     struct Expr*range_start,*range_end,*range_step;bool range_inclusive;
 }Expr;
-typedef enum{SK_PRINT,SK_DECL,SK_ASSIGN,SK_IF,SK_WHILE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
+typedef enum{SK_PRINT,SK_DECL,SK_ASSIGN,SK_IF,SK_WHILE,SK_UNSAFE,SK_FOR,SK_RETURN,SK_BREAK,SK_CONTINUE,SK_CALL}SK;
 typedef struct Stmt{
     SK kind;char*var;Type var_type;Expr*expr,*cond;
     struct Stmt**then;size_t nthen;struct Stmt**els;size_t nels;struct Stmt**loop;size_t nloop;
@@ -305,6 +305,13 @@ static Stmt*parse_one(const SList*lines,size_t*idx,size_t lim,size_t ind){
         Stmt*st=calloc(1,sizeof(Stmt));if(!st){free_expr(cond);for(size_t i=0;i<lc;i++)free_stmt(lb[i]);free(lb);goto done;}
         st->kind=SK_WHILE;st->line=line_no;st->cond=cond;st->loop=lb;st->nloop=lc;res=st;goto done;
     }
+    if(strncmp(s,"unsafe",6)==0){
+        const char*us=s+6;skip(&us);if(*us!=':'||us[1]!=0){ERR("unsafe needs ':'");goto done;}
+        size_t bs=*idx+1,be=blk_end(lines,bs,lim,ind+4);if(bs==be){ERR("unsafe needs body");goto done;}
+        Stmt**lb;size_t lc;if(!parse_block(lines,bs,be,ind+4,&lb,&lc))goto done;*idx=be;
+        Stmt*st=calloc(1,sizeof(Stmt));if(!st){for(size_t i=0;i<lc;i++)free_stmt(lb[i]);free(lb);goto done;}
+        st->kind=SK_UNSAFE;st->line=line_no;st->loop=lb;st->nloop=lc;res=st;goto done;
+    }
     if(strcmp(s,"else:")==0)goto done;
     {bool in=false,esc=false;char*eq=NULL;for(char*p2=s;*p2;p2++){if(*p2=='\\'&&!esc&&in){esc=true;continue;}if(*p2=='"'&&!esc)in=!in;if(*p2=='='&&!in&&p2[1]!='='){eq=p2;break;}esc=false;}
      if(eq){char*lhs=xndup(s,(size_t)(eq-s));rtrim(lhs);const char*lt2=ltrim(lhs);
@@ -374,7 +381,7 @@ static bool parse_program(const SList*lines,Program*prog){
     return true;
 }
 
-static Type type_check_expr(Expr*e,Scope*sc,Program*prog);
+static Type type_check_expr(Expr*e,Scope*sc,Program*prog,bool in_unsafe);
 static size_t g_type_line=0;
 static void type_errorf(const char*fmt,...){
     char msg[384];va_list ap;va_start(ap,fmt);vsnprintf(msg,sizeof(msg),fmt,ap);va_end(ap);
@@ -382,7 +389,7 @@ static void type_errorf(const char*fmt,...){
 }
 #define TERR(...) type_errorf(__VA_ARGS__)
 static FnDef*find_fn(Program*prog,const char*name){for(size_t i=0;i<prog->nfns;i++)if(strcmp(prog->fns[i].name,name)==0)return&prog->fns[i];return NULL;}
-static Type type_check_expr(Expr*e,Scope*sc,Program*prog){
+static Type type_check_expr(Expr*e,Scope*sc,Program*prog,bool in_unsafe){
     if(!e)return type_void();
     switch(e->kind){
     case EK_INT:e->type=type_int();return e->type;
@@ -390,43 +397,44 @@ static Type type_check_expr(Expr*e,Scope*sc,Program*prog){
     case EK_STRING:e->type=type_string();return e->type;
     case EK_PTR_NULL:e->type=type_null_ptr();return e->type;
     case EK_VAR:{Symbol*sym=scope_find(sc,e->name);if(!sym){TERR("TypeError: undefined '%s'",e->name);return type_unknown();}e->type=sym->type;return e->type;}
-    case EK_INT_CAST:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(type_is_ptr(at)||type_eq(at,type_int())||type_eq(at,type_bool())){e->type=type_int();return e->type;}TERR("TypeError: int() cannot cast %s",type_name(at));return type_unknown();}
-    case EK_PTR_CAST:{if(e->argc!=1)return type_unknown();if(!type_is_ptr(e->cast_type)){TERR("TypeError: cast target must be pointer type");return type_unknown();}Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!(type_eq(at,type_int())||type_is_ptr(at))){TERR("TypeError: cannot cast %s to %s",type_name(at),type_name(e->cast_type));return type_unknown();}e->type=e->cast_type;return e->type;}
-    case EK_ALLOC:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_eq(at,type_int())){TERR("TypeError: alloc() requires int, got %s",type_name(at));return type_unknown();}e->type=type_null_ptr();return e->type;}
-    case EK_FREE:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_is_ptr(at)){TERR("TypeError: free() requires pointer, got %s",type_name(at));return type_unknown();}e->type=type_void();return e->type;}
-    case EK_DEREF:{Type it=type_check_expr(e->left,sc,prog);if(type_is_unknown(it))return type_unknown();if(!type_is_ptr(it)){TERR("TypeError: cannot dereference %s",type_name(it));return type_unknown();}Type dt=type_deref(it);if(dt.ptr_depth==0&&dt.base==BASE_VOID)dt=type_int();e->type=dt;return e->type;}
-    case EK_ADDROF:{Type it=type_check_expr(e->left,sc,prog);if(type_is_unknown(it))return type_unknown();if(e->left->kind!=EK_VAR){TERR("TypeError: address-of requires variable");return type_unknown();}e->type=type_addr_of(it);return e->type;}
-    case EK_CALL:{FnDef*fn=find_fn(prog,e->fn);if(!fn){TERR("TypeError: undefined function '%s'",e->fn);return type_unknown();}if(fn->nparams!=e->argc){TERR("TypeError: function '%s' expects %zu args, got %zu",e->fn,fn->nparams,e->argc);return type_unknown();}for(size_t i=0;i<e->argc;i++){Type at=type_check_expr(e->args[i],sc,prog);if(type_is_unknown(at))return type_unknown();if(!type_assignable(fn->param_types[i],at)){TERR("TypeError: arg %zu of '%s' expects %s, got %s",i+1,e->fn,type_name(fn->param_types[i]),type_name(at));return type_unknown();}}e->type=fn->return_type;return e->type;}
-    case EK_BINOP:{Type lt=type_check_expr(e->left,sc,prog);Type rt=type_check_expr(e->right,sc,prog);if(type_is_unknown(lt)||type_is_unknown(rt))return type_unknown();const char*op=e->op;
+    case EK_INT_CAST:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(type_is_ptr(at)||type_eq(at,type_int())||type_eq(at,type_bool())){e->type=type_int();return e->type;}TERR("TypeError: int() cannot cast %s",type_name(at));return type_unknown();}
+    case EK_PTR_CAST:{if(e->argc!=1)return type_unknown();if(!type_is_ptr(e->cast_type)){TERR("TypeError: cast target must be pointer type");return type_unknown();}Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!(type_eq(at,type_int())||type_is_ptr(at))){TERR("TypeError: cannot cast %s to %s",type_name(at),type_name(e->cast_type));return type_unknown();}e->type=e->cast_type;return e->type;}
+    case EK_ALLOC:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_eq(at,type_int())){TERR("TypeError: alloc() requires int, got %s",type_name(at));return type_unknown();}e->type=type_null_ptr();return e->type;}
+    case EK_FREE:{if(e->argc!=1)return type_unknown();Type at=type_check_expr(e->args[0],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_is_ptr(at)){TERR("TypeError: free() requires pointer, got %s",type_name(at));return type_unknown();}e->type=type_void();return e->type;}
+    case EK_DEREF:{Type it=type_check_expr(e->left,sc,prog,in_unsafe);if(type_is_unknown(it))return type_unknown();if(!in_unsafe){TERR("UnsafeError: dereference requires unsafe block");return type_unknown();}if(!type_is_ptr(it)){TERR("TypeError: cannot dereference %s",type_name(it));return type_unknown();}if(it.base==BASE_VOID&&it.ptr_depth==1){TERR("TypeError: cannot dereference ptr<void>");return type_unknown();}e->type=type_deref(it);return e->type;}
+    case EK_ADDROF:{Type it=type_check_expr(e->left,sc,prog,in_unsafe);if(type_is_unknown(it))return type_unknown();if(e->left->kind!=EK_VAR){TERR("TypeError: address-of requires variable");return type_unknown();}e->type=type_addr_of(it);return e->type;}
+    case EK_CALL:{FnDef*fn=find_fn(prog,e->fn);if(!fn){TERR("TypeError: undefined function '%s'",e->fn);return type_unknown();}if(fn->nparams!=e->argc){TERR("TypeError: function '%s' expects %zu args, got %zu",e->fn,fn->nparams,e->argc);return type_unknown();}for(size_t i=0;i<e->argc;i++){Type at=type_check_expr(e->args[i],sc,prog,in_unsafe);if(type_is_unknown(at))return type_unknown();if(!type_assignable(fn->param_types[i],at)){TERR("TypeError: arg %zu of '%s' expects %s, got %s",i+1,e->fn,type_name(fn->param_types[i]),type_name(at));return type_unknown();}}e->type=fn->return_type;return e->type;}
+    case EK_BINOP:{Type lt=type_check_expr(e->left,sc,prog,in_unsafe);Type rt=type_check_expr(e->right,sc,prog,in_unsafe);if(type_is_unknown(lt)||type_is_unknown(rt))return type_unknown();const char*op=e->op;
         if(strcmp(op,"+")==0){if(type_eq(lt,type_int())&&type_eq(rt,type_int())){e->type=type_int();return e->type;}if(type_eq(lt,type_string())&&type_eq(rt,type_string())){e->type=type_string();return e->type;}if(type_is_ptr(lt)&&type_eq(rt,type_int())){e->type=lt;return e->type;}TERR("TypeError: invalid operation %s + %s",type_name(lt),type_name(rt));return type_unknown();}
         if(strcmp(op,"-")==0){if(type_eq(lt,type_int())&&type_eq(rt,type_int())){e->type=type_int();return e->type;}if(type_is_ptr(lt)&&type_eq(rt,type_int())){e->type=lt;return e->type;}TERR("TypeError: invalid operation %s - %s",type_name(lt),type_name(rt));return type_unknown();}
         if(strcmp(op,"*")==0||strcmp(op,"/")==0){if(!(type_eq(lt,type_int())&&type_eq(rt,type_int()))){TERR("TypeError: invalid operation %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_int();return e->type;}
         if(strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0){if(!(type_eq(lt,type_int())&&type_eq(rt,type_int()))){TERR("TypeError: invalid comparison %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_bool();return e->type;}
         if(strcmp(op,"==")==0||strcmp(op,"!=")==0){if(!(type_eq(lt,rt)||(type_is_ptr(lt)&&type_eq(rt,type_null_ptr()))||(type_is_ptr(rt)&&type_eq(lt,type_null_ptr())))){TERR("TypeError: invalid comparison %s %s %s",type_name(lt),op,type_name(rt));return type_unknown();}e->type=type_bool();return e->type;}
         TERR("TypeError: unknown operator '%s'",op);return type_unknown();}
-    case EK_RANGE:{Type st=type_check_expr(e->range_start,sc,prog);if(type_is_unknown(st))return type_unknown();if(!type_eq(st,type_int())){TERR("TypeError: range start must be int, got %s",type_name(st));return type_unknown();}Type et=type_check_expr(e->range_end,sc,prog);if(type_is_unknown(et))return type_unknown();if(!type_eq(et,type_int())){TERR("TypeError: range end must be int, got %s",type_name(et));return type_unknown();}if(e->range_step){Type pt=type_check_expr(e->range_step,sc,prog);if(type_is_unknown(pt))return type_unknown();if(!type_eq(pt,type_int())){TERR("TypeError: range step must be int, got %s",type_name(pt));return type_unknown();}if(e->range_step->kind==EK_INT&&e->range_step->ival==0){TERR("TypeError: range step cannot be zero");return type_unknown();}}e->type=type_int();return e->type;}
+    case EK_RANGE:{Type st=type_check_expr(e->range_start,sc,prog,in_unsafe);if(type_is_unknown(st))return type_unknown();if(!type_eq(st,type_int())){TERR("TypeError: range start must be int, got %s",type_name(st));return type_unknown();}Type et=type_check_expr(e->range_end,sc,prog,in_unsafe);if(type_is_unknown(et))return type_unknown();if(!type_eq(et,type_int())){TERR("TypeError: range end must be int, got %s",type_name(et));return type_unknown();}if(e->range_step){Type pt=type_check_expr(e->range_step,sc,prog,in_unsafe);if(type_is_unknown(pt))return type_unknown();if(!type_eq(pt,type_int())){TERR("TypeError: range step must be int, got %s",type_name(pt));return type_unknown();}if(e->range_step->kind==EK_INT&&e->range_step->ival==0){TERR("TypeError: range step cannot be zero");return type_unknown();}}e->type=type_int();return e->type;}
     default:TERR("TypeError: unknown expression");return type_unknown();
     }
 }
-static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop);
-static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop){
+static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop,bool in_unsafe);
+static bool type_check_stmt(Stmt*s,Scope*sc,Program*prog,bool in_loop,bool in_unsafe){
     g_type_line=s?s->line:0;
     switch(s->kind){
-    case SK_PRINT:{Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;if(!(type_eq(t,type_int())||type_eq(t,type_bool())||type_eq(t,type_string()))){TERR("TypeError: print supports int, bool, str");return false;}return true;}
+    case SK_PRINT:{Type t=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(t))return false;if(!(type_eq(t,type_int())||type_eq(t,type_bool())||type_eq(t,type_string()))){TERR("TypeError: print supports int, bool, str");return false;}return true;}
     case SK_DECL:{if(scope_find(sc,s->var)){TERR("TypeError: variable '%s' already declared",s->var);return false;}return scope_add(sc,s->var,s->var_type,0);} 
-    case SK_ASSIGN:{if(!s->var){Type tt=type_check_expr(s->cond,sc,prog);if(type_is_unknown(tt))return false;if(s->cond->kind!=EK_DEREF){TERR("TypeError: left side must be pointer dereference");return false;}Type vt=type_check_expr(s->expr,sc,prog);if(type_is_unknown(vt))return false;if(!type_assignable(tt,vt)){TERR("TypeError: cannot assign %s to %s",type_name(vt),type_name(tt));return false;}return true;}
-        Symbol*sym=scope_find(sc,s->var);if(!sym){Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;Type final_t=t;if(!type_is_unknown(s->var_type)){if(!type_assignable(s->var_type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(s->var_type));return false;}final_t=s->var_type;}if(!scope_add(sc,s->var,final_t,0))return false;s->var_type=final_t;}else{Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;if(!type_assignable(sym->type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(sym->type));return false;}s->var_type=sym->type;}return true;}
-    case SK_IF:{Type ct=type_check_expr(s->cond,sc,prog);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop)){scope_free(&inner);return false;}scope_free(&inner);if(s->nels>0){Scope e_scope;scope_init(&e_scope,sc);if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop)){scope_free(&e_scope);return false;}scope_free(&e_scope);}return true;}
-    case SK_WHILE:{Type ct=type_check_expr(s->cond,sc,prog);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
-    case SK_FOR:{Type rt=type_check_expr(s->range_expr,sc,prog);if(type_is_unknown(rt))return false;if(!type_eq(rt,type_int())){TERR("TypeError: range expression must be int, got %s",type_name(rt));return false;}Scope inner;scope_init(&inner,sc);if(!scope_add(&inner,s->loop_var,type_int(),0)){scope_free(&inner);return false;}if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
-    case SK_RETURN:{if(s->expr){Type t=type_check_expr(s->expr,sc,prog);if(type_is_unknown(t))return false;}return true;}
+    case SK_ASSIGN:{if(!s->var){Type tt=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(tt))return false;if(s->cond->kind!=EK_DEREF){TERR("TypeError: left side must be pointer dereference");return false;}Type vt=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(vt))return false;if(!type_assignable(tt,vt)){TERR("TypeError: cannot assign %s to %s",type_name(vt),type_name(tt));return false;}return true;}
+        Symbol*sym=scope_find(sc,s->var);if(!sym){Type t=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(t))return false;Type final_t=t;if(!type_is_unknown(s->var_type)){if(!type_assignable(s->var_type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(s->var_type));return false;}final_t=s->var_type;}if(!scope_add(sc,s->var,final_t,0))return false;s->var_type=final_t;}else{Type t=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(t))return false;if(!type_assignable(sym->type,t)){TERR("TypeError: cannot assign %s to %s",type_name(t),type_name(sym->type));return false;}s->var_type=sym->type;}return true;}
+    case SK_IF:{Type ct=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->then,s->nthen,&inner,prog,in_loop,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);if(s->nels>0){Scope e_scope;scope_init(&e_scope,sc);if(!type_check_stmts(s->els,s->nels,&e_scope,prog,in_loop,in_unsafe)){scope_free(&e_scope);return false;}scope_free(&e_scope);}return true;}
+    case SK_WHILE:{Type ct=type_check_expr(s->cond,sc,prog,in_unsafe);if(type_is_unknown(ct))return false;if(!(type_eq(ct,type_int())||type_eq(ct,type_bool()))){TERR("TypeError: condition must be bool or int, got %s",type_name(ct));return false;}Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_UNSAFE:{Scope inner;scope_init(&inner,sc);if(!type_check_stmts(s->loop,s->nloop,&inner,prog,in_loop,true)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_FOR:{Type rt=type_check_expr(s->range_expr,sc,prog,in_unsafe);if(type_is_unknown(rt))return false;if(!type_eq(rt,type_int())){TERR("TypeError: range expression must be int, got %s",type_name(rt));return false;}Scope inner;scope_init(&inner,sc);if(!scope_add(&inner,s->loop_var,type_int(),0)){scope_free(&inner);return false;}if(!type_check_stmts(s->loop,s->nloop,&inner,prog,true,in_unsafe)){scope_free(&inner);return false;}scope_free(&inner);return true;}
+    case SK_RETURN:{if(s->expr){Type t=type_check_expr(s->expr,sc,prog,in_unsafe);if(type_is_unknown(t))return false;}return true;}
     case SK_BREAK:case SK_CONTINUE:if(!in_loop){TERR("TypeError: break/continue outside loop");return false;}return true;
-    case SK_CALL:{Type t=type_check_expr(s->expr,sc,prog);return!type_is_unknown(t);}
+    case SK_CALL:{Type t=type_check_expr(s->expr,sc,prog,in_unsafe);return!type_is_unknown(t);}
     default:return true;
     }
 }
-static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop){for(size_t i=0;i<count;i++)if(!type_check_stmt(stmts[i],sc,prog,in_loop))return false;return true;}
-static bool type_check_fn(FnDef*fn,Program*prog){Scope sc;scope_init(&sc,NULL);for(size_t i=0;i<fn->nparams;i++){if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}}if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false)){scope_free(&sc);return false;}scope_free(&sc);return true;}
+static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool in_loop,bool in_unsafe){for(size_t i=0;i<count;i++)if(!type_check_stmt(stmts[i],sc,prog,in_loop,in_unsafe))return false;return true;}
+static bool type_check_fn(FnDef*fn,Program*prog){Scope sc;scope_init(&sc,NULL);for(size_t i=0;i<fn->nparams;i++){if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}}if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false,false)){scope_free(&sc);return false;}scope_free(&sc);return true;}
 static bool type_check_program(Program*prog){for(size_t i=0;i<prog->nfns;i++)if(!type_check_fn(&prog->fns[i],prog)){fprintf(stderr,"TypeError in '%s': %s\n",prog->fns[i].name,g_err);return false;}return true;}
 
 typedef struct{SBuf out;size_t lbl;}CG;
@@ -499,6 +507,7 @@ static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp,bool no_runtime){
         case SK_ASSIGN:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}if(!s->var){SBuf inner;sb_init(&inner);if(s->cond&&s->cond->kind==EK_DEREF&&s->cond->left){if(!cg_expr_val(g,s->cond->left,&inner,no_runtime)){sb_free(&inner);sb_free(&e);return false;}E(g,"    (*((%s*)(%s)) = %s);\n",cg_type(s->cond->type),inner.d,e.d);}sb_free(&inner);}else E(g,"    %s = %s;\n",s->var,e.d);sb_free(&e);break;}
         case SK_IF:{SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"    if(%s) {\n",c.d);sb_free(&c);if(!cg_stmts(g,s->then,s->nthen,inlp,no_runtime))return false;if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,inlp,no_runtime))return false;}E(g,"    }\n");break;}
         case SK_WHILE:{E(g,"    while(1) {\n");SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"        if(!(%s)) break;\n",c.d);sb_free(&c);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"    }\n");break;}
+        case SK_UNSAFE:{if(!cg_stmts(g,s->loop,s->nloop,inlp,no_runtime))return false;break;}
         case SK_FOR:{size_t lf=L(g);Expr*r=s->range_expr;SBuf st,ed,sp;sb_init(&st);sb_init(&ed);sb_init(&sp);if(!cg_expr_val(g,r->range_start,&st,no_runtime)||!cg_expr_val(g,r->range_end,&ed,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}if(r->range_step&&!cg_expr_val(g,r->range_step,&sp,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}E(g,"    {\n");E(g,"        long long _s%zu = %s, _e%zu = %s;\n",lf,st.d,lf,ed.d);if(r->range_step)E(g,"        long long _p%zu = %s;\n",lf,sp.d);else E(g,"        long long _p%zu = (_s%zu <= _e%zu) ? 1 : -1;\n",lf,lf,lf);sb_free(&st);sb_free(&ed);sb_free(&sp);E(g,"        for(%s = _s%zu; ",s->loop_var,lf);if(r->range_inclusive)E(g,"(_p%zu > 0) ? (%s <= _e%zu) : (%s >= _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);else E(g,"(_p%zu > 0) ? (%s < _e%zu) : (%s > _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);E(g,"%s += _p%zu) {\n",s->loop_var,lf);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"        }\n");E(g,"    }\n");break;}
         case SK_RETURN:{if(s->expr){SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    return %s;\n",e.d);sb_free(&e);}else E(g,"    return 0;\n");break;}
         case SK_BREAK:E(g,"    break;\n");break;
@@ -515,6 +524,7 @@ static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size
         if((s->kind==SK_ASSIGN||s->kind==SK_DECL)&&s->var){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->var);(*vars)[*count].type=type_is_unknown(s->var_type)?type_int():s->var_type;(*count)++;}}
         if(s->kind==SK_IF){if(!collect_vars(s->then,s->nthen,vars,count,cap,fn))return false;if(!collect_vars(s->els,s->nels,vars,count,cap,fn))return false;}
         if(s->kind==SK_WHILE){if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
+        if(s->kind==SK_UNSAFE){if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
         if(s->kind==SK_FOR){bool found=false;for(size_t j=0;j<*count;j++)if(strcmp((*vars)[j].name,s->loop_var)==0){found=true;break;}for(size_t j=0;j<fn->nparams;j++)if(strcmp(fn->params[j],s->loop_var)==0){found=true;break;}if(!found){if(*count==*cap){size_t nc=*cap?*cap*2:8;VarInfo*np=realloc(*vars,nc*sizeof(VarInfo));if(!np)return false;*vars=np;*cap=nc;}(*vars)[*count].name=xdup(s->loop_var);(*vars)[*count].type=type_int();(*count)++;}if(!collect_vars(s->loop,s->nloop,vars,count,cap,fn))return false;}
     }
     return true;

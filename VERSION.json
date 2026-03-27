@@ -1,11 +1,11 @@
 {
-    "version": "0.5.0",
+    "version": "0.6.0",
     "backend": "c-static",
     "changes": [
-        "Typed pointer system: ptr<T> declarations and pointer casts",
+        "Unsafe block safety model for raw pointer dereference",
+        "Dereference outside unsafe is rejected with UnsafeError",
+        "ptr<void> dereference is forbidden and requires explicit typed cast",
         "Strict static typing for int, bool, str, and pointers",
-        "Compile-time TypeError diagnostics with line numbers",
-        "Kernel/freestanding output mode via --no-runtime",
-        "No-runtime entrypoint and external hook ABI for low-level targets"
+        "Kernel/freestanding output mode via --no-runtime"
     ]
 }

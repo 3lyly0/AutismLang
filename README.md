@@ -1,4 +1,4 @@
-# AutismLang (v0.5.0)
+# AutismLang (v0.6.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.5.0)
+## Implemented Features (v0.6.0)
 
 - Function declaration with `fn name():`
 - Function parameters require explicit types: `fn add(int a, int b):`
@@ -37,6 +37,7 @@ fn main():
 - `while condition:` loops
 - `for var in range:` loops with native range syntax
 - Function parameters and calls
+- Controlled raw pointer access via `unsafe:` blocks
 - Command-line options: `--help`, `--version`, `--metadata`
 
 ## Native Range Syntax
@@ -103,8 +104,10 @@ AutismLang supports low-level pointer operations for OS development:
 ```aut
 fn main():
     ptr<void> x = alloc(8)    # Allocate bytes, generic pointer
-    *x = 42             # Dereference and assign
-    print(*x)           # Dereference and read (prints 42)
+    ptr<int> xi = ptr<int>(x) # Cast to typed pointer before dereference
+    unsafe:
+        *xi = 42        # Dereference and assign
+        print(*xi)      # Dereference and read (prints 42)
     free(x)             # Free allocated memory
 ```
 
@@ -114,7 +117,8 @@ fn main():
 fn main():
     int y = 100
     ptr<int> p = &y     # Get typed address of variable
-    print(*p)           # Dereference (prints 100)
+    unsafe:
+        print(*p)       # Dereference (prints 100)
 ```
 
 ### Pointer Casting
@@ -136,11 +140,17 @@ fn main():
 |-----------|-------------|
 | `ptr<void> x = alloc(size)` | Allocate memory, returns generic pointer |
 | `free(ptr)` | Free allocated memory |
-| `*expr` | Dereference pointer (read/write) |
+| `unsafe: *expr` | Dereference pointer (read/write) only in unsafe block |
 | `&var` | Get address of variable |
 | `ptr<T>(value)` | Cast integer/pointer to typed pointer |
 | `int(ptr_val)` | Cast pointer to integer |
 | `null` / `NULL` | Null pointer constant |
+
+### Unsafe Rules
+
+- Dereference outside `unsafe:` fails with `UnsafeError`
+- Dereferencing `ptr<void>` is always forbidden
+- Cast `ptr<void>` to a concrete pointer type first (for example `ptr<int>(raw)`)
 
 ### Hexadecimal Literals
 
@@ -218,7 +228,13 @@ Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
 
 ## Changelog
 
-### v0.5.0 (Current)
+### v0.6.0 (Current)
+- **Unsafe block model**: explicit `unsafe:` block required for pointer dereference
+- **Compile-time UnsafeError**: dereference outside unsafe is rejected
+- **Strict raw-pointer rule**: `ptr<void>` cannot be dereferenced directly
+- **Typed cast workflow**: explicit cast from `ptr<void>` to `ptr<T>` before dereference
+
+### v0.5.0
 - **Typed pointer system**: `ptr<T>` declarations and `ptr<T>(value)` casts
 - **Strict static typing**: compile-time checks across `int`, `bool`, `str`, and pointer types
 - **Pointer safety checks**: typed dereference/assignment validation and pointer arithmetic rules

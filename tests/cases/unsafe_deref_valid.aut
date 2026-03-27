@@ -1,0 +1,6 @@
+fn main():
+    int x = 0
+    ptr<int> p = &x
+    unsafe:
+        *p = 10
+    print(x)

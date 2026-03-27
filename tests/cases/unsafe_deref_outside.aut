@@ -1,0 +1,4 @@
+fn main():
+    int x = 0
+    ptr<int> p = &x
+    *p = 10

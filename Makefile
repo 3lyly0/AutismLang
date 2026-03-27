@@ -1,4 +1,4 @@
-# AutismLang Makefile v0.5.0 - C backend
+# AutismLang Makefile v0.6.0 - C backend
 CC     = gcc
 AUTISM = ./autism
 FILE   ?= examples/hello
@@ -6,8 +6,8 @@ NAME   = $(notdir $(FILE))
 SRC    = $(FILE).aut
 _C     = build/$(NAME).c
 _EXE   = build/$(NAME)
-TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid
-TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign
+TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid unsafe_deref_valid unsafe_void_cast_valid
+TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign unsafe_deref_outside unsafe_void_deref
 
 .PHONY: all run compiler test test-suite version clean
 
@@ -53,7 +53,7 @@ test-success-%: build/tests/% tests/expected/%.out
 test-fail-%: tests/cases/%.aut | build/tests
 	@set +e; ./autism $< -o build/tests/$*.c > build/tests/$*.actual 2>&1; code=$$?; set -e; \
 	if [ $$code -eq 0 ]; then echo "Test failed: expected non-zero exit"; cat build/tests/$*.actual; exit 1; fi; \
-	if ! grep -F "TypeError" build/tests/$*.actual > /dev/null; then echo "Test failed: expected TypeError"; cat build/tests/$*.actual; exit 1; fi
+	if ! grep -E "TypeError|UnsafeError" build/tests/$*.actual > /dev/null; then echo "Test failed: expected TypeError or UnsafeError"; cat build/tests/$*.actual; exit 1; fi
 	@echo PASS: $*
 
 version: compiler

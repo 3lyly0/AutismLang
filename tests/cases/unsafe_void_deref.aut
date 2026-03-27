@@ -1,0 +1,4 @@
+fn main():
+    ptr<void> p = ptr<void>(0xB8000)
+    unsafe:
+        *p = 10
