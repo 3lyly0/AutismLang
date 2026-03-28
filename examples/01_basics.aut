@@ -1,0 +1,19 @@
+fn main():
+    # Variables and Inference
+    int score = 100
+    str greeting = "Welcome to AutismLang v0.8.0!"
+    bool is_active = true
+
+    # Arithmetic
+    int a = 20
+    int b = 5
+    int addition = a + b
+    int complex = (a * b) - (a / 2)
+    
+    # String Operations
+    str full_msg = greeting + " Let's code."
+
+    # I/O Print
+    print(full_msg)
+    print("Calculated Score:")
+    print(addition)

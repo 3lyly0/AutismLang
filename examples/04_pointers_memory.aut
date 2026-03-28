@@ -1,0 +1,23 @@
+fn main():
+    # 1. Address-of and Unsafe Dereferencing
+    int secret = 42
+    ptr<int> secret_ptr = &secret
+    
+    print("Secret Address points to:")
+    unsafe:
+        print(*secret_ptr)
+
+    # 2. Heap Allocation (Returns generic ptr<void>)
+    ptr<void> raw_memory = alloc(sizeof(int))
+    
+    # 3. Typed Pointer Casting
+    ptr<int> memory = ptr<int>(raw_memory)
+
+    # 4. Memory Mutation (Strictly in Unsafe)
+    unsafe:
+        *memory = 999
+        print("Heap Memory Value:")
+        print(*memory)
+
+    # 5. Deallocation
+    free(raw_memory)

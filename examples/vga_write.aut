@@ -1,5 +1,0 @@
-fn main():
-    ptr<void> raw = ptr<void>(0xB8000)
-    ptr<int> vga = ptr<int>(raw)
-    unsafe:
-        *vga = 65

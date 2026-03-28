@@ -1,0 +1,34 @@
+fn main():
+    int target = 8
+
+    # 1. If, Elif, Else Conditions
+    if target < 5:
+        print("Too small")
+    elif target == 8:
+        print("Perfect Match!")
+    else:
+        print("Too big")
+
+    # 2. While Loops
+    int counter = 3
+    print("Countdown:")
+    while counter > 0:
+        print(counter)
+        counter = counter - 1
+
+    # 3. Native Ranges
+    print("Iterating 0 to 4 (Exclusive):")
+    for i in 0..5:
+        print(i)
+
+    print("Iterating 0 to 5 (Inclusive):")
+    for i in 0..=5:
+        print(i)
+
+    print("Iterating Evens (Step of 2):")
+    for n in 0..10..2:
+        print(n)
+
+    print("Reverse Range (Step -1):")
+    for r in 3..0..-1:
+        print(r)

@@ -1,0 +1,30 @@
+# Define a custom memory layout
+struct Pos:
+    int x
+    int y
+
+struct Player:
+    Pos location
+    ptr<Pos> proxy
+    int health
+
+fn main():
+    # Struct Initialization (Strict argument orders)
+    Pos spawn = Pos(50, 60)
+    
+    # Nested field access (Value Semantics)
+    print("Spawn Coordinate X:")
+    print(spawn.x)
+
+    # Manual Memory Assignment
+    Player entity = Player(spawn, null, 100)
+
+    # Extracting Fields
+    int hp = entity.health
+    print("Health:")
+    print(hp)
+
+    # Struct Address Offsets natively
+    int proxy_offset = offsetof(Player, proxy)
+    print("Offset of proxy in Player:")
+    print(proxy_offset)

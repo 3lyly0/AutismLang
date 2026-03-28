@@ -1,0 +1,20 @@
+fn main():
+    # 1. Inline Assembly Execution
+    unsafe:
+        asm("nop")       # No operation instruction
+
+    # 2. Direct Hardware Port I/O (x86/x86_64 limit)
+    int serial_port = 0x3F8
+    unsafe:
+        # Example writing ASCII 'A' (65) to COM1
+        out(serial_port, 65)
+
+        # Example reading back from a hardware port
+        int byte_read = in(serial_port)
+
+    # 3. Direct VGA Text Buffer (Bare Metal OS Booting)
+    ptr<void> hardware_ram = ptr<void>(0xB8000)
+    volatile ptr<int> vga_buffer = ptr<int>(hardware_ram)
+    
+    unsafe:
+        *vga_buffer = 0x0F41  # A in white-on-black format

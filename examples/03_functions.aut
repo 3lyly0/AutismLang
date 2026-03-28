@@ -1,0 +1,23 @@
+# Standard Function
+fn multiply(int x, int y):
+    int result = x * y
+    return result
+
+# Using Recursion
+fn factorial(int n):
+    if n == 0:
+        return 1
+    elif n == 1:
+        return 1
+    
+    int temp = factorial(n - 1)
+    return n * temp
+
+fn main():
+    int m = multiply(5, 5)
+    print("5 * 5 is: ")
+    print(m)
+
+    int f = factorial(4)
+    print("Factorial of 4 is: ")
+    print(f)
