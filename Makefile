@@ -1,4 +1,4 @@
-# AutismLang Makefile v0.7.0 - C backend
+# AutismLang Makefile v0.8.0 - C backend
 CC     = gcc
 AUTISM = ./autism
 FILE   ?= examples/hello
@@ -6,8 +6,8 @@ NAME   = $(notdir $(FILE))
 SRC    = $(FILE).aut
 _C     = build/$(NAME).c
 _EXE   = build/$(NAME)
-TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid unsafe_deref_valid unsafe_void_cast_valid asm_nop_valid volatile_ptr_valid
-TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign unsafe_deref_outside unsafe_void_deref asm_non_string out_outside_unsafe in_outside_unsafe
+TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid unsafe_deref_valid unsafe_void_cast_valid asm_nop_valid volatile_ptr_valid struct_valid
+TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign unsafe_deref_outside unsafe_void_deref asm_non_string out_outside_unsafe in_outside_unsafe struct_invalid_decl
 
 .PHONY: all run compiler test test-suite version clean
 
@@ -47,7 +47,9 @@ build/tests/%: build/tests/%.c
 
 test-success-%: build/tests/% tests/expected/%.out
 	@./build/tests/$* > build/tests/$*.actual 2>&1
-	@diff -u tests/expected/$*.out build/tests/$*.actual
+	@tr -d '\r' < build/tests/$*.actual > build/tests/$*.actual.tmp
+	@tr -d '\r' < tests/expected/$*.out > build/tests/$*.expected.tmp
+	@diff -u build/tests/$*.expected.tmp build/tests/$*.actual.tmp
 	@echo PASS: $*
 
 test-fail-%: tests/cases/%.aut | build/tests

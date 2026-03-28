@@ -1,0 +1,29 @@
+struct Point:
+    x int
+    y int
+
+struct Rect:
+    top_left Point
+    width int
+    height int
+
+fn main():
+    Point[2] pts
+    pts[0].x = 10
+    pts[0].y = 20
+    pts[1].x = 30
+    pts[1].y = 40
+
+    ptr<Point> p = &pts[0]
+    unsafe:
+        p->x = 15
+        p = p + 1
+        p->y = 50
+    
+    Rect r = Rect(pts[0], 100, 200)
+    print(r.top_left.x)
+    print(r.top_left.y)
+    print(r.width)
+    
+    print(sizeof(Rect))
+    print(offsetof(Rect, width))

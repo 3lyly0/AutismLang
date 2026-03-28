@@ -1,4 +1,4 @@
-# AutismLang (v0.7.0)
+# AutismLang (v0.8.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.7.0)
+## Implemented Features (v0.8.0)
 
 - Function declaration with `fn name():`
 - Function parameters require explicit types: `fn add(int a, int b):`
@@ -42,6 +42,7 @@ fn main():
 - Port I/O primitives: `out(port, value)` and `in(port)` (x86/x86_64, requires unsafe block)
 - Volatile typed pointers: `volatile ptr<T> name`
 - Cross-platform architecture support: x86, x86_64, ARM64 (with fallback safety)
+- Structs and Nested Types: `struct Point:` with strict C-compatible memory layouts
 - Command-line options: `--help`, `--version`, `--metadata`
 
 ## Native Range Syntax
@@ -236,7 +237,14 @@ Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
 
 ## Changelog
 
-### v0.7.0 (Current)
+### v0.8.0 (Current)
+- **Struct System**: `struct Name:` block definition with C-compatible ABI layouts.
+- **Strict Validations**: Unregistered structs correctly throw compiler type errors directly within AutismLang.
+- **Memory Consistency**: Supported `ptr<StructType>` references and strict field access matching (`.` for value, `->` for pointers).
+- **Array Distinct Types**: Arrays are strictly distinct from pointers with natively blocked implicit decaying.
+- **Improved Syntax Matching**: Fixes ambiguity between `..` range operators and struct `.field` accessors.
+
+### v0.7.0
 - **Hardware interaction**: inline assembly `asm("...")`, port I/O `in(port)` / `out(port, value)`
 - **Volatile pointers**: `volatile ptr<T>` for memory-mapped I/O patterns
 - **Safety enforcement**: all hardware features require `unsafe:` block
