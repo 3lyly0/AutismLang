@@ -41,7 +41,6 @@ fn main():
 - Inline assembly: `asm("...")` (string literal only, requires unsafe block)
 - Port I/O primitives: `out(port, value)` and `in(port)` (x86/x86_64, requires unsafe block)
 - Volatile typed pointers: `volatile ptr<T> name`
-- Cross-platform architecture support: x86, x86_64, ARM64 (with fallback safety)
 - Structs and Nested Types: `struct Point:` with strict C-compatible memory layouts
 - Command-line options: `--help`, `--version`, `--metadata`
 
@@ -284,8 +283,6 @@ Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
 - **Hardware interaction**: inline assembly `asm("...")`, port I/O `in(port)` / `out(port, value)`
 - **Volatile pointers**: `volatile ptr<T>` for memory-mapped I/O patterns
 - **Safety enforcement**: all hardware features require `unsafe:` block
-- **Cross-platform support**: x86/x86_64 with architecture-aware fallback for ARM64 and other architectures
-- **Portable codegen**: preprocessor guards for platform-specific inline assembly helpers
 
 ### v0.6.0
 - **Unsafe block model**: explicit `unsafe:` block required for pointer dereference

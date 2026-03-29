@@ -9,56 +9,20 @@ on:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-gcc
-            os: ubuntu-latest
-            compiler: gcc
-            shell: bash
-            binary: autism
-          - name: macos-clang
-            os: macos-latest
-            compiler: clang
-            shell: bash
-            binary: autism
-          - name: windows-msys2-gcc
-            os: windows-latest
-            compiler: gcc
-            shell: msys2
-            binary: autism.exe
-
-    defaults:
-      run:
-        shell: ${{ matrix.shell == 'msys2' && 'msys2 {0}' || 'bash' }}
+    name: linux-gcc
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSYS2 (Windows)
-        if: matrix.shell == 'msys2'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            make
-            diffutils
-            grep
-            mingw-w64-ucrt-x86_64-gcc
-
       - name: Build compiler
         run: |
           set -eu
-          ${{ matrix.compiler }} -O2 -o ${{ matrix.binary }} autism.c
-          ./${{ matrix.binary }} --version
+          gcc -O2 -o autism autism.c
+          ./autism --version
 
-      - name: Run tests (Linux Only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Run tests
         run: |
           set -eu
-          AUTISM=./${{ matrix.binary }} make test
+          AUTISM=./autism make test
