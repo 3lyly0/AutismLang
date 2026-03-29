@@ -1,8 +1,8 @@
-# AutismLang (v0.8.0)
+# AutismLang (v0.9.0)
 
 AutismLang is a new low-level language project intended to build **AutismOS**.
 This repository contains a bootstrap compiler written in C with Python-like syntax for function layout.
-Current backend emits C code, then compiles it with GCC.
+Current backend emits native x86_64 assembly (GAS syntax) which compiles directly into freestanding Linux ELF binaries via GNU as and ld, with zero dependency on libc or C.
 
 ## Current Syntax
 
@@ -19,7 +19,7 @@ fn main():
         print("not ready")
 ```
 
-## Implemented Features (v0.8.0)
+## Implemented Features (v0.9.0)
 
 - Function declaration with `fn name():`
 - Function parameters require explicit types: `fn add(int a, int b):`
@@ -171,29 +171,58 @@ ptr<void> vga = ptr<void>(0xB8000)   # VGA text buffer
 
 ## Quick Start
 
-1. Build compiler (Windows with gcc):
+1. Build compiler (Requires C compiler like gcc/clang):
 
 ```bash
-gcc autism.c -o autism.exe
+gcc -O2 autism.c -o autism
 ```
 
-2. Compile source:
+2. Compile source to x86_64 Assembly:
 
 ```bash
-./autism examples/hello.aut -o build/hello.c
+./autism examples/01_basics.aut -o build/program.s
 ```
 
-3. Build executable from generated C:
+3. Assemble and Link (Linux x86_64 or WSL / Docker):
 
 ```bash
-gcc -O2 build/hello.c -o build/hello.exe
-./build/hello.exe
+as --64 build/program.s -o build/program.o
+ld build/program.o -o build/program
+./build/program
 ```
 
-4. Run tests:
+4. Run test suite:
 
 ```bash
 make test
+```
+
+## Native ASM Output Example (v0.9.0)
+
+With the new v0.9.0 backend, compiling a simple program generates pure, standalone x86_64 assembly (zero libc).
+
+**Source (`example.aut`):**
+```aut
+fn main():
+    int x = 10
+    int y = 5
+    print(x + y)
+```
+
+**Generated Assembly (`example.s` snippet):**
+```gas
+_fn_main:
+    pushq %rbp
+    movq %rsp, %rbp
+    subq $16, %rsp
+    movq %r15, -8(%rbp)
+    pushq $10
+    popq %rax
+    movq %rax, -16(%rbp)      # x = 10
+    pushq $5
+    popq %rax
+    movq %rax, -24(%rbp)      # y = 5
+    # ... arithmetic and syscall write (1)
 ```
 
 ## Kernel/Freestanding Output
@@ -237,7 +266,14 @@ Entry symbol is `aut_entry()` instead of `main()` in no-runtime mode.
 
 ## Changelog
 
-### v0.8.0 (Current)
+### v0.9.0 (Current)
+- **Native ASM Backend**: Completely replaced the C translation backend with a custom x86_64 assembly generator.
+- **Zero Libc Dependency**: Programs are 100% freestanding Linux ELF binaries. Prints string and integers directly via the explicit Linux `write` (1) Syscall.
+- **System V ABI**: True stack frame operations and Linux ABI function register passing (`%rdi`, `%rsi`, etc.) built natively.
+- **Stack-based Output**: Stack-level evaluation emitting GNU AT&T `.s` files assembled purely natively via `as` + `ld`.
+- **Docker Environment**: Added an Alpine-based configurable shell script (`docker.ps1`) to seamlessly build and assemble binaries natively on any OS environment.
+
+### v0.8.0
 - **Struct System**: `struct Name:` block definition with C-compatible ABI layouts.
 - **Strict Validations**: Unregistered structs correctly throw compiler type errors directly within AutismLang.
 - **Memory Consistency**: Supported `ptr<StructType>` references and strict field access matching (`.` for value, `->` for pointers).
