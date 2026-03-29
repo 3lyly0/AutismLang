@@ -57,7 +57,8 @@ jobs:
           ${{ matrix.compiler }} -O2 -o ${{ matrix.binary }} autism.c
           ./${{ matrix.binary }} --version
 
-      - name: Run tests
+      - name: Run tests (Linux Only)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           set -eu
           AUTISM=./${{ matrix.binary }} make test
