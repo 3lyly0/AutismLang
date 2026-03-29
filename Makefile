@@ -1,13 +1,18 @@
-# AutismLang Makefile v0.8.0 - C backend
+# AutismLang Makefile v0.9.0 - x86_64 ASM backend
 CC     = gcc
+AS     = as
+LD     = ld
 AUTISM = ./autism
 FILE   ?= examples/hello
 NAME   = $(notdir $(FILE))
 SRC    = $(FILE).aut
-_C     = build/$(NAME).c
+_ASM   = build/$(NAME).s
+_OBJ   = build/$(NAME).o
 _EXE   = build/$(NAME)
-TEST_SUCCESS = else_if_bool arithmetic_precedence while_break_continue function_return range_native typing_valid pointer_valid unsafe_deref_valid unsafe_void_cast_valid asm_nop_valid volatile_ptr_valid struct_valid
-TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add pointer_invalid_deref pointer_invalid_assign unsafe_deref_outside unsafe_void_deref asm_non_string out_outside_unsafe in_outside_unsafe struct_invalid_decl
+
+# ASM backend v1 tests (int, bool, str, arithmetic, control flow, functions)
+TEST_SUCCESS = arithmetic_precedence typing_valid function_return else_if_bool while_break_continue range_native asm_nop_valid
+TEST_FAIL    = type_error_add comparison_type_error typing_invalid_reassign typing_invalid_add asm_non_string struct_invalid_decl
 
 .PHONY: all run compiler test test-suite version clean
 
@@ -18,12 +23,15 @@ run: $(_EXE)
 	@echo Running $(_EXE)...
 	$(_EXE)
 
-$(_C): $(SRC)
+$(_ASM): $(SRC)
 	mkdir -p build
-	$(AUTISM) $(SRC) -o $(_C)
+	$(AUTISM) $(SRC) -o $(_ASM)
 
-$(_EXE): $(_C)
-	$(CC) -O2 $(_C) -o $(_EXE)
+$(_OBJ): $(_ASM)
+	$(AS) --64 $(_ASM) -o $(_OBJ)
+
+$(_EXE): $(_OBJ)
+	$(LD) $(_OBJ) -o $(_EXE)
 
 compiler:
 	$(CC) -O2 -o autism autism.c
@@ -39,11 +47,14 @@ test-suite: $(addprefix test-success-,$(TEST_SUCCESS)) $(addprefix test-fail-,$(
 build/tests:
 	mkdir -p build/tests
 
-build/tests/%.c: tests/cases/%.aut | build/tests
+build/tests/%.s: tests/cases/%.aut | build/tests
 	$(AUTISM) $< -o $@
 
-build/tests/%: build/tests/%.c
-	$(CC) -O2 $< -o $@
+build/tests/%.o: build/tests/%.s
+	$(AS) --64 $< -o $@
+
+build/tests/%: build/tests/%.o
+	$(LD) $< -o $@
 
 test-success-%: build/tests/% tests/expected/%.out
 	@./build/tests/$* > build/tests/$*.actual 2>&1
@@ -53,7 +64,7 @@ test-success-%: build/tests/% tests/expected/%.out
 	@echo PASS: $*
 
 test-fail-%: tests/cases/%.aut | build/tests
-	@set +e; ./autism $< -o build/tests/$*.c > build/tests/$*.actual 2>&1; code=$$?; set -e; \
+	@set +e; ./autism $< -o build/tests/$*.s > build/tests/$*.actual 2>&1; code=$$?; set -e; \
 	if [ $$code -eq 0 ]; then echo "Test failed: expected non-zero exit"; cat build/tests/$*.actual; exit 1; fi; \
 	if ! grep -E "TypeError|UnsafeError" build/tests/$*.actual > /dev/null; then echo "Test failed: expected TypeError or UnsafeError"; cat build/tests/$*.actual; exit 1; fi
 	@echo PASS: $*

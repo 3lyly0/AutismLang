@@ -1,12 +1,14 @@
 {
-    "version": "0.7.0",
-    "backend": "c-static",
+    "version": "0.9.0",
+    "backend": "x86_64-asm",
     "changes": [
-        "Direct hardware access: inline assembly (asm), port I/O (in/out), volatile pointers",
-        "Portable architecture support: x86/x86_64 with cross-platform fallback (ARM64 compatible)",
-        "Enhanced safety: all hardware features require unsafe blocks",
-        "Unsafe block safety model for raw pointer dereference",
-        "Strict static typing for int, bool, str, and pointers",
-        "Kernel/freestanding output mode via --no-runtime"
+        "Replaced C backend with native x86_64 assembly code generator",
+        "Stack-based evaluation model with GAS (AT&T) syntax output",
+        "Direct Linux syscalls for I/O (write) and exit — zero libc dependency",
+        "System V ABI compliant function calls (up to 6 register args)",
+        "Integer-to-string conversion via manual division loop",
+        "Support: int/bool/str literals, arithmetic, comparisons, if/else, while, for-range, break/continue, functions, print, inline asm",
+        "Output: .s files assembled via as+ld into standalone ELF binaries",
+        "Freestanding output mode via --no-runtime"
     ]
 }

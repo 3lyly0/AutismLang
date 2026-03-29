@@ -13,7 +13,7 @@
 #define MKDIR(p) mkdir((p),0755)
 #endif
 
-#define AUTISMLANG_VERSION "0.8.0"
+#define AUTISMLANG_VERSION "0.9.0"
 static char g_err[512];
 #define ERR(...) snprintf(g_err,sizeof(g_err),__VA_ARGS__)
 
@@ -626,94 +626,186 @@ static bool type_check_stmts(Stmt**stmts,size_t count,Scope*sc,Program*prog,bool
 static bool type_check_fn(FnDef*fn,Program*prog){Scope sc;scope_init(&sc,NULL);for(size_t i=0;i<fn->nparams;i++){if(!scope_add(&sc,fn->params[i],fn->param_types[i],1)){scope_free(&sc);return false;}}if(!type_check_stmts(fn->body,fn->nbody,&sc,prog,false,false)){scope_free(&sc);return false;}scope_free(&sc);return true;}
 static bool type_check_program(Program*prog){for(size_t i=0;i<prog->nfns;i++)if(!type_check_fn(&prog->fns[i],prog)){fprintf(stderr,"TypeError in '%s': %s\n",prog->fns[i].name,g_err);return false;}return true;}
 
-typedef struct{SBuf out;size_t lbl;}CG;
-static void cg_init(CG*g){sb_init(&g->out);g->lbl=0;}
-static void cg_free(CG*g){sb_free(&g->out);}
+/* ============ ASM x86_64 Code Generator (GAS syntax) ============ */
+typedef struct {
+    SBuf out,rodata;size_t lbl,str_count;
+    char**var_names;int*var_offsets;size_t var_count,var_cap;
+    size_t loop_start[64],loop_end[64];int loop_depth;
+    size_t frame_size,for_counter;
+} CG;
+static void cg_init(CG*g){sb_init(&g->out);sb_init(&g->rodata);g->lbl=0;g->str_count=0;g->var_names=NULL;g->var_offsets=NULL;g->var_count=0;g->var_cap=0;g->loop_depth=0;g->frame_size=0;g->for_counter=0;}
+static void cg_free(CG*g){sb_free(&g->out);sb_free(&g->rodata);for(size_t i=0;i<g->var_count;i++)free(g->var_names[i]);free(g->var_names);free(g->var_offsets);}
 static size_t L(CG*g){return g->lbl++;}
 static void E(CG*g,const char*fmt,...){char tmp[1024];va_list ap;va_start(ap,fmt);vsnprintf(tmp,sizeof(tmp),fmt,ap);va_end(ap);sb_cat(&g->out,tmp);}
-static const char*cg_type(Type t){
-    static char bufs[8][128];static int bi=0;char base[128];
-    if(t.base==BASE_INT)snprintf(base,sizeof(base),"long long");
-    else if(t.base==BASE_BOOL)snprintf(base,sizeof(base),"int");
-    else if(t.base==BASE_STRING)snprintf(base,sizeof(base),"const char*");
-    else if(t.base==BASE_STRUCT)snprintf(base,sizeof(base),"struct %s",t.struct_name);
-    else snprintf(base,sizeof(base),"void");
-    bi=(bi+1)%8;snprintf(bufs[bi],sizeof(bufs[bi]),"%s",base);
-    for(unsigned i=0;i<t.ptr_depth;i++)strcat(bufs[bi],"*");
-    return bufs[bi];
+static void R(CG*g,const char*fmt,...){char tmp[1024];va_list ap;va_start(ap,fmt);vsnprintf(tmp,sizeof(tmp),fmt,ap);va_end(ap);sb_cat(&g->rodata,tmp);}
+static void cg_reset_vars(CG*g){for(size_t i=0;i<g->var_count;i++)free(g->var_names[i]);free(g->var_names);free(g->var_offsets);g->var_names=NULL;g->var_offsets=NULL;g->var_count=0;g->var_cap=0;}
+static int cg_var_offset(CG*g,const char*name){for(size_t i=0;i<g->var_count;i++)if(strcmp(g->var_names[i],name)==0)return g->var_offsets[i];return 0;}
+static void cg_add_var(CG*g,const char*name,int offset){
+    if(g->var_count==g->var_cap){size_t nc=g->var_cap?g->var_cap*2:16;g->var_names=realloc(g->var_names,nc*sizeof(char*));g->var_offsets=realloc(g->var_offsets,nc*sizeof(int));g->var_cap=nc;}
+    g->var_names[g->var_count]=xdup(name);g->var_offsets[g->var_count]=offset;g->var_count++;
 }
-static void cg_decl(Type t, const char* name, SBuf* out) {
-    if (t.is_array) sb_fmt(out, "%s %s[%zu]", cg_type(t), name, t.array_size);
-    else sb_fmt(out, "%s %s", cg_type(t), name);
+static size_t cg_add_string(CG*g,const char*s){
+    size_t idx=g->str_count++;R(g,".LC_str_%zu:\n    .string \"",idx);
+    for(size_t i=0;s[i];i++){unsigned char c=(unsigned char)s[i];
+        switch(c){case'\n':R(g,"\\n");break;case'\t':R(g,"\\t");break;case'\r':R(g,"\\r");break;case'\\':R(g,"\\\\");break;case'"':R(g,"\\\"");break;
+        default:if(c>=32&&c<127){char t[2]={(char)c,0};R(g,"%s",t);}else R(g,"\\%03o",c);break;}}
+    R(g,"\"\n");return idx;
 }
-static char*escape_for_c(const char*s){
-    size_t len=strlen(s);char*result=malloc(len*4+1);if(!result)return NULL;size_t j=0;
-    for(size_t i=0;i<len;i++){unsigned char c=(unsigned char)s[i];
-        switch(c){case'\n':result[j++]='\\';result[j++]='n';break;case'\t':result[j++]='\\';result[j++]='t';break;case'\r':result[j++]='\\';result[j++]='r';break;case'\\':result[j++]='\\';result[j++]='\\';break;case'"':result[j++]='\\';result[j++]='"';break;default:if(c>=32&&c<127)result[j++]=c;else j+=sprintf(result+j,"\\x%02x",c);break;}}
-    result[j]='\0';return result;
+static void cg_emit_runtime(CG*g){
+    E(g,"\n_aut_strlen:\n    xorq %%rax, %%rax\n.L_sl_loop:\n    cmpb $0, (%%rdi,%%rax)\n    je .L_sl_done\n    incq %%rax\n    jmp .L_sl_loop\n.L_sl_done:\n    ret\n");
+    E(g,"\n_aut_print_newline:\n    pushq %%rbp\n    movq %%rsp, %%rbp\n    subq $16, %%rsp\n    movb $10, -1(%%rbp)\n    movq $1, %%rax\n    movq $1, %%rdi\n    leaq -1(%%rbp), %%rsi\n    movq $1, %%rdx\n    syscall\n    leave\n    ret\n");
+    E(g,"\n_aut_print_str:\n    pushq %%rbp\n    movq %%rsp, %%rbp\n    subq $16, %%rsp\n    movq %%rdi, -8(%%rbp)\n    call _aut_strlen\n    movq %%rax, %%rdx\n    movq $1, %%rax\n    movq $1, %%rdi\n    movq -8(%%rbp), %%rsi\n    syscall\n    call _aut_print_newline\n    leave\n    ret\n");
+    E(g,"\n_aut_print_int:\n    pushq %%rbp\n    movq %%rsp, %%rbp\n    subq $48, %%rsp\n    movq %%rdi, %%rax\n    leaq -1(%%rbp), %%r8\n    xorq %%rcx, %%rcx\n    xorq %%r9, %%r9\n    testq %%rax, %%rax\n    jns .L_pi_pos\n    movq $1, %%r9\n    negq %%rax\n");
+    E(g,".L_pi_pos:\n    testq %%rax, %%rax\n    jnz .L_pi_loop\n    movb $48, (%%r8)\n    incq %%rcx\n    jmp .L_pi_write\n");
+    E(g,".L_pi_loop:\n    xorq %%rdx, %%rdx\n    movq $10, %%r10\n    divq %%r10\n    addb $48, %%dl\n    movb %%dl, (%%r8)\n    decq %%r8\n    incq %%rcx\n    testq %%rax, %%rax\n    jnz .L_pi_loop\n    incq %%r8\n");
+    E(g,".L_pi_write:\n    testq %%r9, %%r9\n    jz .L_pi_nosign\n    decq %%r8\n    movb $45, (%%r8)\n    incq %%rcx\n.L_pi_nosign:\n    movq $1, %%rax\n    movq $1, %%rdi\n    movq %%r8, %%rsi\n    movq %%rcx, %%rdx\n    syscall\n    call _aut_print_newline\n    leave\n    ret\n");
 }
-static bool cg_expr_val(CG*g,Expr*e,SBuf*result,bool no_runtime);
-static bool cg_stmts(CG*g,Stmt**s,size_t n,bool inlp,bool no_runtime);
-static bool cg_expr_val(CG*g,Expr*e,SBuf*result,bool no_runtime){
+/* ============ Expression Codegen ============ */
+static bool cg_asm_expr(CG*g,Expr*e);
+static bool cg_asm_stmts(CG*g,Stmt**s,size_t n);
+static bool cg_asm_expr(CG*g,Expr*e){
     switch(e->kind){
-    case EK_INT:sb_fmt(result,"%lld",e->ival);return true;
-    case EK_BOOL:sb_cat(result,e->ival?"1":"0");return true;
-    case EK_STRING:{char*esc=escape_for_c(e->sval);if(!esc)return false;sb_fmt(result,"\"%s\"",esc);free(esc);return true;}
-    case EK_PTR_NULL:sb_cat(result,"((void*)0)");return true;
-    case EK_VAR:sb_cat(result,e->name);return true;
-    case EK_INT_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((long long)(%s))",a.d);sb_free(&a);return true;}
-    case EK_IN:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((long long)aut_in8((unsigned short)(%s)))",a.d);sb_free(&a);return true;}
-    case EK_PTR_CAST:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"((%s)(unsigned long long)(%s))",cg_type(e->cast_type),a.d);sb_free(&a);return true;}
-    case EK_ALLOC:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"aut_alloc((unsigned long long)(%s))",a.d);else sb_fmt(result,"malloc((size_t)(%s))",a.d);sb_free(&a);return true;}
-    case EK_FREE:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[0],&a,no_runtime)){sb_free(&a);return false;}if(no_runtime)sb_fmt(result,"(aut_free(%s),(void*)0)",a.d);else sb_fmt(result,"(free(%s),(void*)0)",a.d);sb_free(&a);return true;}
-    case EK_DEREF:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"(*((%s*)(%s)))",cg_type(e->type),a.d);sb_free(&a);return true;}
-    case EK_ADDROF:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"(&(%s))",a.d);sb_free(&a);return true;}
-    case EK_FIELD:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"(%s.%s)",a.d,e->name);sb_free(&a);return true;}
-    case EK_PTR_FIELD:{SBuf a;sb_init(&a);if(!cg_expr_val(g,e->left,&a,no_runtime)){sb_free(&a);return false;}sb_fmt(result,"(((%s)(%s))->%s)",cg_type(e->left->type),a.d,e->name);sb_free(&a);return true;}
-    case EK_INDEX:{SBuf l,r;sb_init(&l);sb_init(&r);if(!cg_expr_val(g,e->left,&l,no_runtime)||!cg_expr_val(g,e->right,&r,no_runtime)){sb_free(&l);sb_free(&r);return false;}if(type_is_ptr(e->left->type))sb_fmt(result,"(((%s)(%s))[%s])",cg_type(e->left->type),l.d,r.d);else sb_fmt(result,"(%s[%s])",l.d,r.d);sb_free(&l);sb_free(&r);return true;}
-    case EK_SIZEOF:{sb_fmt(result,"((long long)sizeof(%s))",cg_type(e->cast_type));return true;}
-    case EK_OFFSETOF:{sb_fmt(result,"((long long)offsetof(%s, %s))",cg_type(e->cast_type),e->name);return true;}
-    case EK_STRUCT_INIT:{sb_fmt(result,"((%s){",cg_type(e->type));for(size_t i=0;i<e->argc;i++){SBuf a;sb_init(&a);if(!cg_expr_val(g,e->args[i],&a,no_runtime)){sb_free(&a);return false;}if(i>0)sb_cat(result,", ");sb_cat(result,a.d);sb_free(&a);}sb_cat(result,"})");return true;}
-    case EK_CALL:{SBuf*args=malloc(e->argc*sizeof(SBuf));for(size_t i=0;i<e->argc;i++){sb_init(&args[i]);if(!cg_expr_val(g,e->args[i],&args[i],no_runtime)){for(size_t j=0;j<=i;j++)sb_free(&args[j]);free(args);return false;}}sb_fmt(result,"_fn_%s(",e->fn);for(size_t i=0;i<e->argc;i++){if(i)sb_cat(result,", ");sb_cat(result,args[i].d);sb_free(&args[i]);}sb_cat(result,")");free(args);return true;}
+    case EK_INT:
+        if(e->ival>=-2147483647LL&&e->ival<=2147483647LL)E(g,"    pushq $%lld\n",e->ival);
+        else{E(g,"    movabsq $%lld, %%rax\n",e->ival);E(g,"    pushq %%rax\n");}
+        return true;
+    case EK_BOOL:E(g,"    pushq $%lld\n",e->ival);return true;
+    case EK_STRING:{size_t idx=cg_add_string(g,e->sval);E(g,"    leaq .LC_str_%zu(%%rip), %%rax\n",idx);E(g,"    pushq %%rax\n");return true;}
+    case EK_VAR:{int off=cg_var_offset(g,e->name);if(!off){ERR("ASM: unknown var '%s'",e->name);return false;}E(g,"    movq %d(%%rbp), %%rax\n",off);E(g,"    pushq %%rax\n");return true;}
     case EK_BINOP:{
         const char*op=e->op;
         if(strcmp(op,"+")==0&&type_eq(e->type,type_string())){
-            if(e->left->kind!=EK_STRING||e->right->kind!=EK_STRING){ERR("str + str is supported only for string literals");return false;}
-            size_t ln=strlen(e->left->sval),rn=strlen(e->right->sval);char*joined=malloc(ln+rn+1);if(!joined)return false;
-            memcpy(joined,e->left->sval,ln);memcpy(joined+ln,e->right->sval,rn+1);
-            char*esc=escape_for_c(joined);free(joined);if(!esc)return false;sb_fmt(result,"\"%s\"",esc);free(esc);return true;
+            if(e->left->kind!=EK_STRING||e->right->kind!=EK_STRING){ERR("str+str only for literals");return false;}
+            size_t ln=strlen(e->left->sval),rn=strlen(e->right->sval);char*j=malloc(ln+rn+1);if(!j)return false;
+            memcpy(j,e->left->sval,ln);memcpy(j+ln,e->right->sval,rn+1);size_t idx=cg_add_string(g,j);free(j);
+            E(g,"    leaq .LC_str_%zu(%%rip), %%rax\n",idx);E(g,"    pushq %%rax\n");return true;
         }
-        SBuf l,r;sb_init(&l);sb_init(&r);
-        if(!cg_expr_val(g,e->left,&l,no_runtime)||!cg_expr_val(g,e->right,&r,no_runtime)){sb_free(&l);sb_free(&r);return false;}
-        if(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0)sb_fmt(result,"(%s %s %s ? 1 : 0)",l.d,op,r.d);
-        else sb_fmt(result,"(%s %s %s)",l.d,op,r.d);
-        sb_free(&l);sb_free(&r);return true;
+        if(!cg_asm_expr(g,e->left))return false;if(!cg_asm_expr(g,e->right))return false;
+        E(g,"    popq %%rbx\n");E(g,"    popq %%rax\n");
+        if(strcmp(op,"+")==0){E(g,"    addq %%rbx, %%rax\n");}
+        else if(strcmp(op,"-")==0){E(g,"    subq %%rbx, %%rax\n");}
+        else if(strcmp(op,"*")==0){E(g,"    imulq %%rbx, %%rax\n");}
+        else if(strcmp(op,"/")==0){E(g,"    cqto\n    idivq %%rbx\n");}
+        else if(strcmp(op,"==")==0){E(g,"    cmpq %%rbx, %%rax\n    sete %%al\n    movzbq %%al, %%rax\n");}
+        else if(strcmp(op,"!=")==0){E(g,"    cmpq %%rbx, %%rax\n    setne %%al\n    movzbq %%al, %%rax\n");}
+        else if(strcmp(op,"<")==0){E(g,"    cmpq %%rbx, %%rax\n    setl %%al\n    movzbq %%al, %%rax\n");}
+        else if(strcmp(op,">")==0){E(g,"    cmpq %%rbx, %%rax\n    setg %%al\n    movzbq %%al, %%rax\n");}
+        else if(strcmp(op,"<=")==0){E(g,"    cmpq %%rbx, %%rax\n    setle %%al\n    movzbq %%al, %%rax\n");}
+        else if(strcmp(op,">=")==0){E(g,"    cmpq %%rbx, %%rax\n    setge %%al\n    movzbq %%al, %%rax\n");}
+        else{ERR("ASM: unknown op '%s'",op);return false;}
+        E(g,"    pushq %%rax\n");return true;
     }
+    case EK_CALL:{
+        static const char*argregs[]={"%rdi","%rsi","%rdx","%rcx","%r8","%r9"};
+        if(e->argc>6){ERR("ASM v1: max 6 args");return false;}
+        for(size_t i=0;i<e->argc;i++){if(!cg_asm_expr(g,e->args[i]))return false;}
+        for(int i=(int)e->argc-1;i>=0;i--)E(g,"    popq %s\n",argregs[i]);
+        E(g,"    movq %%rsp, %%r15\n    andq $-16, %%rsp\n    call _fn_%s\n    movq %%r15, %%rsp\n",e->fn);
+        E(g,"    pushq %%rax\n");return true;
+    }
+    case EK_INT_CAST:if(e->argc!=1)return false;return cg_asm_expr(g,e->args[0]);
     case EK_RANGE:ERR("range outside for");return false;
-    default:return false;
+    case EK_PTR_NULL:case EK_PTR_CAST:case EK_ALLOC:case EK_FREE:case EK_DEREF:case EK_ADDROF:case EK_IN:
+    case EK_FIELD:case EK_PTR_FIELD:case EK_INDEX:case EK_SIZEOF:case EK_OFFSETOF:case EK_STRUCT_INIT:
+        ERR("ASM backend v1 does not support this feature");return false;
+    default:ERR("ASM: unknown expr kind");return false;
     }
 }
-static bool cg_stmts(CG*g,Stmt**stmts,size_t count,bool inlp,bool no_runtime){
+/* ============ Statement Codegen ============ */
+static bool cg_asm_stmts(CG*g,Stmt**stmts,size_t count){
     for(size_t i=0;i<count;i++){Stmt*s=stmts[i];
-        switch(s->kind){
-        case SK_PRINT:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}if(no_runtime){if(type_eq(s->expr->type,type_bool()))E(g,"    aut_print_str(%s?\"true\":\"false\");\n",e.d);else if(type_eq(s->expr->type,type_string()))E(g,"    aut_print_str(%s);\n",e.d);else E(g,"    aut_print_i64((long long)(%s));\n",e.d);}else{if(type_eq(s->expr->type,type_bool()))E(g,"    printf(\"%%s\\n\",%s?\"true\":\"false\");\n",e.d);else if(type_eq(s->expr->type,type_string()))E(g,"    printf(\"%%s\\n\",%s);\n",e.d);else E(g,"    printf(\"%%lld\\n\",(long long)(%s));\n",e.d);}sb_free(&e);break;}
-        case SK_DECL:break;
-        case SK_ASSIGN:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}if(!s->var){SBuf cond;sb_init(&cond);if(!cg_expr_val(g,s->cond,&cond,no_runtime)){sb_free(&cond);sb_free(&e);return false;}if(s->cond->kind==EK_DEREF)E(g,"    (*((%s*)(&(%s))) = %s);\n",cg_type(s->cond->type),cond.d,e.d);else E(g,"    %s = %s;\n",cond.d,e.d);sb_free(&cond);}else E(g,"    %s = %s;\n",s->var,e.d);sb_free(&e);break;}
-        case SK_IF:{SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"    if(%s) {\n",c.d);sb_free(&c);if(!cg_stmts(g,s->then,s->nthen,inlp,no_runtime))return false;if(s->nels>0){E(g,"    } else {\n");if(!cg_stmts(g,s->els,s->nels,inlp,no_runtime))return false;}E(g,"    }\n");break;}
-        case SK_WHILE:{E(g,"    while(1) {\n");SBuf c;sb_init(&c);if(!cg_expr_val(g,s->cond,&c,no_runtime)){sb_free(&c);return false;}E(g,"        if(!(%s)) break;\n",c.d);sb_free(&c);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"    }\n");break;}
-        case SK_UNSAFE:{if(!cg_stmts(g,s->loop,s->nloop,inlp,no_runtime))return false;break;}
-        case SK_ASM:{char*esc=escape_for_c(s->asm_text?s->asm_text:"");if(!esc)return false;E(g,"    __asm__ __volatile__(\"%s\");\n",esc);free(esc);break;}
-        case SK_OUT:{SBuf p,v;sb_init(&p);sb_init(&v);if(!cg_expr_val(g,s->cond,&p,no_runtime)||!cg_expr_val(g,s->expr,&v,no_runtime)){sb_free(&p);sb_free(&v);return false;}E(g,"    aut_out8((unsigned short)(%s), (unsigned char)(%s));\n",p.d,v.d);sb_free(&p);sb_free(&v);break;}
-        case SK_FOR:{size_t lf=L(g);Expr*r=s->range_expr;SBuf st,ed,sp;sb_init(&st);sb_init(&ed);sb_init(&sp);if(!cg_expr_val(g,r->range_start,&st,no_runtime)||!cg_expr_val(g,r->range_end,&ed,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}if(r->range_step&&!cg_expr_val(g,r->range_step,&sp,no_runtime)){sb_free(&st);sb_free(&ed);sb_free(&sp);return false;}E(g,"    {\n");E(g,"        long long _s%zu = %s, _e%zu = %s;\n",lf,st.d,lf,ed.d);if(r->range_step)E(g,"        long long _p%zu = %s;\n",lf,sp.d);else E(g,"        long long _p%zu = (_s%zu <= _e%zu) ? 1 : -1;\n",lf,lf,lf);sb_free(&st);sb_free(&ed);sb_free(&sp);E(g,"        for(%s = _s%zu; ",s->loop_var,lf);if(r->range_inclusive)E(g,"(_p%zu > 0) ? (%s <= _e%zu) : (%s >= _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);else E(g,"(_p%zu > 0) ? (%s < _e%zu) : (%s > _e%zu); ",lf,s->loop_var,lf,s->loop_var,lf);E(g,"%s += _p%zu) {\n",s->loop_var,lf);if(!cg_stmts(g,s->loop,s->nloop,true,no_runtime))return false;E(g,"        }\n");E(g,"    }\n");break;}
-        case SK_RETURN:{if(s->expr){SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    return %s;\n",e.d);sb_free(&e);}else E(g,"    return 0;\n");break;}
-        case SK_BREAK:E(g,"    break;\n");break;
-        case SK_CONTINUE:E(g,"    continue;\n");break;
-        case SK_CALL:{SBuf e;sb_init(&e);if(!cg_expr_val(g,s->expr,&e,no_runtime)){sb_free(&e);return false;}E(g,"    (void)%s;\n",e.d);sb_free(&e);break;}
-        default:break;
-        }
-    }
+    switch(s->kind){
+    case SK_PRINT:{
+        if(!cg_asm_expr(g,s->expr))return false;E(g,"    popq %%rdi\n");
+        if(type_eq(s->expr->type,type_int())){
+            E(g,"    movq %%rsp, %%r15\n    andq $-16, %%rsp\n    call _aut_print_int\n    movq %%r15, %%rsp\n");
+        }else if(type_eq(s->expr->type,type_bool())){
+            size_t lb=L(g);size_t ti=cg_add_string(g,"true");size_t fi=cg_add_string(g,"false");
+            E(g,"    testq %%rdi, %%rdi\n    jz .L_pb_f_%zu\n",lb);
+            E(g,"    leaq .LC_str_%zu(%%rip), %%rdi\n    jmp .L_pb_e_%zu\n",ti,lb);
+            E(g,".L_pb_f_%zu:\n    leaq .LC_str_%zu(%%rip), %%rdi\n",lb,fi);
+            E(g,".L_pb_e_%zu:\n    movq %%rsp, %%r15\n    andq $-16, %%rsp\n    call _aut_print_str\n    movq %%r15, %%rsp\n",lb);
+        }else if(type_eq(s->expr->type,type_string())){
+            E(g,"    movq %%rsp, %%r15\n    andq $-16, %%rsp\n    call _aut_print_str\n    movq %%r15, %%rsp\n");
+        }else{E(g,"    movq %%rsp, %%r15\n    andq $-16, %%rsp\n    call _aut_print_int\n    movq %%r15, %%rsp\n");}
+        break;}
+    case SK_DECL:break;
+    case SK_ASSIGN:{
+        if(!s->var){ERR("ASM v1: complex LHS assignment not supported");return false;}
+        if(!cg_asm_expr(g,s->expr))return false;
+        int off=cg_var_offset(g,s->var);if(!off){ERR("ASM: unknown var '%s'",s->var);return false;}
+        E(g,"    popq %%rax\n    movq %%rax, %d(%%rbp)\n",off);break;}
+    case SK_IF:{
+        size_t lb=L(g);if(!cg_asm_expr(g,s->cond))return false;
+        E(g,"    popq %%rax\n    testq %%rax, %%rax\n    jz .L_else_%zu\n",lb);
+        if(!cg_asm_stmts(g,s->then,s->nthen))return false;
+        if(s->nels>0){E(g,"    jmp .L_endif_%zu\n.L_else_%zu:\n",lb,lb);
+            if(!cg_asm_stmts(g,s->els,s->nels))return false;E(g,".L_endif_%zu:\n",lb);
+        }else E(g,".L_else_%zu:\n",lb);
+        break;}
+    case SK_WHILE:{
+        size_t ls=L(g),le=L(g);
+        g->loop_start[g->loop_depth]=ls;g->loop_end[g->loop_depth]=le;g->loop_depth++;
+        E(g,".L_loop_%zu:\n",ls);if(!cg_asm_expr(g,s->cond))return false;
+        E(g,"    popq %%rax\n    testq %%rax, %%rax\n    jz .L_lend_%zu\n",le);
+        if(!cg_asm_stmts(g,s->loop,s->nloop))return false;
+        E(g,"    jmp .L_loop_%zu\n.L_lend_%zu:\n",ls,le);g->loop_depth--;break;}
+    case SK_FOR:{
+        Expr*r=s->range_expr;
+        int var_off=cg_var_offset(g,s->loop_var);
+        if(!var_off){ERR("ASM: unknown loop var '%s'",s->loop_var);return false;}
+        size_t fi=g->for_counter++;
+        char en[32],sn[32];snprintf(en,sizeof(en),"__for_end_%zu",fi);snprintf(sn,sizeof(sn),"__for_step_%zu",fi);
+        int end_off=cg_var_offset(g,en),step_off=cg_var_offset(g,sn);
+        /* Compute start -> loop var */
+        if(!cg_asm_expr(g,r->range_start))return false;
+        E(g,"    popq %%rax\n    movq %%rax, %d(%%rbp)\n",var_off);
+        /* Compute end */
+        if(!cg_asm_expr(g,r->range_end))return false;
+        E(g,"    popq %%rax\n    movq %%rax, %d(%%rbp)\n",end_off);
+        /* Compute step */
+        if(r->range_step){if(!cg_asm_expr(g,r->range_step))return false;E(g,"    popq %%rax\n    movq %%rax, %d(%%rbp)\n",step_off);}
+        else{size_t al=L(g);E(g,"    movq %d(%%rbp), %%rax\n    cmpq %d(%%rbp), %%rax\n    jg .L_neg_step_%zu\n",var_off,end_off,al);
+            E(g,"    movq $1, %%rax\n    jmp .L_step_done_%zu\n.L_neg_step_%zu:\n    movq $-1, %%rax\n.L_step_done_%zu:\n",al,al,al);
+            E(g,"    movq %%rax, %d(%%rbp)\n",step_off);}
+        /* Loop */
+        size_t ls=L(g),le=L(g),cl=L(g);
+        g->loop_start[g->loop_depth]=ls;g->loop_end[g->loop_depth]=le;g->loop_depth++;
+        E(g,".L_loop_%zu:\n",ls);
+        E(g,"    movq %d(%%rbp), %%rax\n",var_off);
+        E(g,"    movq %d(%%rbp), %%rbx\n",step_off);
+        E(g,"    testq %%rbx, %%rbx\n    js .L_for_neg_%zu\n",cl);
+        /* Positive step */
+        E(g,"    cmpq %d(%%rbp), %%rax\n",end_off);
+        if(r->range_inclusive)E(g,"    jg .L_lend_%zu\n",le);else E(g,"    jge .L_lend_%zu\n",le);
+        E(g,"    jmp .L_for_body_%zu\n.L_for_neg_%zu:\n",cl,cl);
+        /* Negative step */
+        E(g,"    cmpq %d(%%rbp), %%rax\n",end_off);
+        if(r->range_inclusive)E(g,"    jl .L_lend_%zu\n",le);else E(g,"    jle .L_lend_%zu\n",le);
+        E(g,".L_for_body_%zu:\n",cl);
+        if(!cg_asm_stmts(g,s->loop,s->nloop))return false;
+        /* Increment */
+        E(g,"    movq %d(%%rbp), %%rax\n    addq %%rax, %d(%%rbp)\n",step_off,var_off);
+        E(g,"    jmp .L_loop_%zu\n.L_lend_%zu:\n",ls,le);g->loop_depth--;break;}
+    case SK_RETURN:
+        if(s->expr){if(!cg_asm_expr(g,s->expr))return false;E(g,"    popq %%rax\n");}
+        else E(g,"    xorq %%rax, %%rax\n");
+        E(g,"    movq -8(%%rbp), %%r15\n    leave\n    ret\n");break;
+    case SK_BREAK:
+        if(g->loop_depth<=0){ERR("break outside loop");return false;}
+        E(g,"    jmp .L_lend_%zu\n",g->loop_end[g->loop_depth-1]);break;
+    case SK_CONTINUE:
+        if(g->loop_depth<=0){ERR("continue outside loop");return false;}
+        E(g,"    jmp .L_loop_%zu\n",g->loop_start[g->loop_depth-1]);break;
+    case SK_UNSAFE:if(!cg_asm_stmts(g,s->loop,s->nloop))return false;break;
+    case SK_ASM:E(g,"    %s\n",s->asm_text?s->asm_text:"nop");break;
+    case SK_OUT:ERR("ASM v1: out() not supported");return false;
+    case SK_CALL:if(!cg_asm_expr(g,s->expr))return false;E(g,"    addq $8, %%rsp\n");break;
+    default:break;
+    }}
     return true;
 }
+/* ============ Function + Entry Point ============ */
 typedef struct{char*name;Type type;int is_volatile;}VarInfo;
 static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size_t*cap,FnDef*fn){
     for(size_t i=0;i<nbody;i++){Stmt*s=body[i];
@@ -725,67 +817,68 @@ static bool collect_vars(Stmt**body,size_t nbody,VarInfo**vars,size_t*count,size
     }
     return true;
 }
-static bool cg_fn(CG*g,FnDef*fn,const Program*prog,bool no_runtime){
-    (void)prog;E(g,"static %s _fn_%s(",cg_type(fn->return_type),fn->name);
-    for(size_t i=0;i<fn->nparams;i++){if(i)E(g,", ");E(g,"%s %s",cg_type(fn->param_types[i]),fn->params[i]);}
-    E(g,") {\n");VarInfo*vars=NULL;size_t vcount=0,vcap=0;
-    if(!collect_vars(fn->body,fn->nbody,&vars,&vcount,&vcap,fn)){free(vars);return false;}
-    for(size_t i=0;i<vcount;i++){
-        SBuf d;sb_init(&d);cg_decl(vars[i].type,vars[i].name,&d);
-        if(vars[i].type.is_array||(vars[i].type.base==BASE_STRUCT&&vars[i].type.ptr_depth==0))
-            E(g,"    %s%s = {0};\n",vars[i].is_volatile?"volatile ":"",d.d);
-        else
-            E(g,"    %s%s = 0;\n",vars[i].is_volatile?"volatile ":"",d.d);
-        sb_free(&d);free(vars[i].name);
+static size_t count_for_stmts(Stmt**body,size_t nbody){
+    size_t c=0;
+    for(size_t i=0;i<nbody;i++){Stmt*s=body[i];
+        if(s->kind==SK_FOR){c++;c+=count_for_stmts(s->loop,s->nloop);}
+        if(s->kind==SK_IF){c+=count_for_stmts(s->then,s->nthen);c+=count_for_stmts(s->els,s->nels);}
+        if(s->kind==SK_WHILE)c+=count_for_stmts(s->loop,s->nloop);
+        if(s->kind==SK_UNSAFE)c+=count_for_stmts(s->loop,s->nloop);
     }
-    free(vars);if(!cg_stmts(g,fn->body,fn->nbody,false,no_runtime))return false;E(g,"    return 0;\n");E(g,"}\n\n");return true;
+    return c;
+}
+static bool cg_asm_fn(CG*g,FnDef*fn){
+    static const char*argregs[]={"%rdi","%rsi","%rdx","%rcx","%r8","%r9"};
+    cg_reset_vars(g);
+    VarInfo*vars=NULL;size_t vcount=0,vcap=0;
+    if(!collect_vars(fn->body,fn->nbody,&vars,&vcount,&vcap,fn)){free(vars);return false;}
+    size_t nfor=count_for_stmts(fn->body,fn->nbody);
+    /* Layout: rbp-8=saved r15, then params, locals, for-hidden-vars */
+    int offset=-8; /* rbp-8 reserved for r15 */
+    for(size_t i=0;i<fn->nparams;i++){offset-=8;cg_add_var(g,fn->params[i],offset);}
+    for(size_t i=0;i<vcount;i++){offset-=8;cg_add_var(g,vars[i].name,offset);free(vars[i].name);}
+    free(vars);
+    for(size_t i=0;i<nfor;i++){
+        char en[32],sn[32];snprintf(en,sizeof(en),"__for_end_%zu",i);snprintf(sn,sizeof(sn),"__for_step_%zu",i);
+        offset-=8;cg_add_var(g,en,offset);offset-=8;cg_add_var(g,sn,offset);
+    }
+    size_t frame_size=(size_t)(-offset);
+    if(frame_size%16!=0)frame_size+=16-(frame_size%16);
+    g->frame_size=frame_size;g->for_counter=0;g->loop_depth=0;
+    /* Prologue */
+    E(g,"\n.globl _fn_%s\n_fn_%s:\n",fn->name,fn->name);
+    E(g,"    pushq %%rbp\n    movq %%rsp, %%rbp\n");
+    if(frame_size>0)E(g,"    subq $%zu, %%rsp\n",frame_size);
+    E(g,"    movq %%r15, -8(%%rbp)\n");
+    /* Store params from registers */
+    for(size_t i=0;i<fn->nparams;i++){int po=cg_var_offset(g,fn->params[i]);E(g,"    movq %s, %d(%%rbp)\n",argregs[i],po);}
+    /* Zero-init locals */
+    for(size_t i=fn->nparams;i<g->var_count;i++)E(g,"    movq $0, %d(%%rbp)\n",g->var_offsets[i]);
+    /* Body */
+    if(!cg_asm_stmts(g,fn->body,fn->nbody))return false;
+    /* Epilogue */
+    E(g,"    xorq %%rax, %%rax\n    movq -8(%%rbp), %%r15\n    leave\n    ret\n");
+    return true;
 }
 static bool codegen(const Program*prog,const char*out_path,bool no_runtime){
-    CG g;cg_init(&g);E(&g,"/* AutismLang v%s */\n",AUTISMLANG_VERSION);
-    if(no_runtime){
-        E(&g,"typedef unsigned long long aut_u64;\n");
-        E(&g,"extern void aut_print_i64(long long value);\n");
-        E(&g,"extern void aut_print_str(const char* value);\n");
-        E(&g,"extern void* aut_alloc(aut_u64 size);\n");
-        E(&g,"extern void aut_free(void* ptr);\n\n");
+    CG g;cg_init(&g);
+    E(&g,"# AutismLang v%s - x86_64 ASM backend\n.section .text\n",AUTISMLANG_VERSION);
+    cg_emit_runtime(&g);
+    for(size_t i=0;i<prog->nfns;i++){if(!cg_asm_fn(&g,(FnDef*)&prog->fns[i])){cg_free(&g);return false;}}
+    if(!no_runtime){
+        E(&g,"\n.globl _start\n_start:\n    xorq %%rbp, %%rbp\n    andq $-16, %%rsp\n    call _fn_main\n    movq $60, %%rax\n    xorq %%rdi, %%rdi\n    syscall\n");
     }else{
-        E(&g,"#include <stdio.h>\n#include <stdlib.h>\n#include <stddef.h>\n\n");
+        E(&g,"\n.globl aut_entry\naut_entry:\n    call _fn_main\n    ret\n");
     }
-    E(&g,"static inline unsigned char aut_in8(unsigned short port) {\n");
-    E(&g,"#if defined(__i386__) || defined(__x86_64__)\n");
-    E(&g,"    unsigned char value;\n");
-    E(&g,"    __asm__ __volatile__(\"inb %%1, %%0\" : \"=a\"(value) : \"Nd\"(port));\n");
-    E(&g,"    return value;\n");
-    E(&g,"#else\n");
-    E(&g,"    (void)port;\n");
-    E(&g,"    return 0;\n");
-    E(&g,"#endif\n");
-    E(&g,"}\n");
-    E(&g,"static inline void aut_out8(unsigned short port, unsigned char value) {\n");
-    E(&g,"#if defined(__i386__) || defined(__x86_64__)\n");
-    E(&g,"    __asm__ __volatile__(\"outb %%0, %%1\" :: \"a\"(value), \"Nd\"(port));\n");
-    E(&g,"#else\n");
-    E(&g,"    (void)port;\n");
-    E(&g,"    (void)value;\n");
-    E(&g,"#endif\n");
-    E(&g,"}\n\n");
-    for(size_t i=0;i<prog->n_ordered_structs;i++){
-        StructDef*sd=prog->ordered_structs[i];E(&g,"struct %s {\n",sd->name);
-        for(size_t j=0;j<sd->nfields;j++){SBuf fbuf;sb_init(&fbuf);cg_decl(sd->fields[j].type,sd->fields[j].name,&fbuf);E(&g,"    %s;\n",fbuf.d);sb_free(&fbuf);}
-        E(&g,"};\n\n");
-    }
-    for(size_t i=0;i<prog->nfns;i++){E(&g,"static %s _fn_%s(",cg_type(prog->fns[i].return_type),prog->fns[i].name);for(size_t j=0;j<prog->fns[i].nparams;j++){if(j)E(&g,", ");E(&g,"%s",cg_type(prog->fns[i].param_types[j]));}E(&g,");\n");}E(&g,"\n");
-    for(size_t i=0;i<prog->nfns;i++){if(!cg_fn(&g,(FnDef*)&prog->fns[i],prog,no_runtime)){cg_free(&g);return false;}}
-    if(no_runtime)E(&g,"void aut_entry(void) { (void)_fn_main(); }\n");
-    else E(&g,"int main(void) { _fn_main(); return 0; }\n");
+    E(&g,"\n.section .rodata\n");
+    if(g.rodata.d)sb_cat(&g.out,g.rodata.d);
     char*pc=xdup(out_path);for(size_t i=0;pc[i];i++){if(pc[i]=='/'||pc[i]=='\\'){char sv=pc[i];pc[i]=0;if(pc[0])MKDIR(pc);pc[i]=sv;}}free(pc);
     FILE*fp=fopen(out_path,"wb");if(!fp){cg_free(&g);return false;}fwrite(g.out.d,1,g.out.len,fp);fclose(fp);cg_free(&g);return true;
 }
 int main(int argc,char**argv){
-    const char*in=NULL,*out="build/out.c";
-    bool no_runtime=false;
+    const char*in=NULL,*out="build/out.s";bool no_runtime=false;
     for(int i=1;i<argc;i++){
-        if(strcmp(argv[i],"--help")==0){printf("Usage: %s <input.aut> [-o output.c] [--no-runtime]\n",argv[0]);return 0;}
+        if(strcmp(argv[i],"--help")==0){printf("Usage: %s <input.aut> [-o output.s] [--no-runtime]\n",argv[0]);return 0;}
         else if(strcmp(argv[i],"--version")==0){printf("AutismLang %s\n",AUTISMLANG_VERSION);return 0;}
         else if(strcmp(argv[i],"--no-runtime")==0){no_runtime=true;}
         else if(strcmp(argv[i],"-o")==0){if(i+1>=argc)return 1;out=argv[++i];}
